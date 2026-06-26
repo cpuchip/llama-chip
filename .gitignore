@@ -1,0 +1,10 @@
+/llama-chip
+/llama-chip.exe
+*.exe
+/dist/
+config.json
+*.log
+.DS_Store
+
+# playwright-cli session snapshots
+.playwright-cli/

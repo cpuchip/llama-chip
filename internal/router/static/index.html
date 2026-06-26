@@ -1,0 +1,540 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>llama-chip</title>
+<style>
+  :root { --bg:#0f1115; --panel:#181b22; --line:#262b36; --ink:#e6e9ef; --dim:#8b93a3; --ok:#39d98a; --warn:#f0a020; --bad:#ff5d5d; --accent:#6ea8fe; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.5 ui-sans-serif,system-ui,Segoe UI,Roboto,sans-serif; }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:14px; }
+  header h1 { margin:0; font-size:18px; letter-spacing:.5px; }
+  header .sub { color:var(--dim); font-size:12px; }
+  main { padding:20px; max-width:1100px; margin:0 auto; display:grid; gap:20px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  .panel h2 { margin:0 0 12px; font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); }
+  .gpus { display:flex; gap:14px; flex-wrap:wrap; }
+  .gpu { flex:1; min-width:220px; border:1px solid var(--line); border-radius:8px; padding:12px; }
+  .gpu .bar { height:8px; background:#0c0e12; border-radius:5px; overflow:hidden; margin-top:8px; }
+  .gpu .bar > i { display:block; height:100%; background:linear-gradient(90deg,var(--accent),#9b6efe); }
+  .gpu .meta { display:flex; justify-content:space-between; color:var(--dim); font-size:12px; margin-top:6px; }
+  table { width:100%; border-collapse:collapse; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); font-size:13px; }
+  th { color:var(--dim); font-weight:600; }
+  .pill { padding:2px 8px; border-radius:20px; font-size:12px; }
+  .s-healthy{ background:rgba(57,217,138,.15); color:var(--ok);} .s-starting{ background:rgba(240,160,32,.15); color:var(--warn);}
+  .s-crashed{ background:rgba(255,93,93,.15); color:var(--bad);} .s-stopped{ background:#222; color:var(--dim);}
+  form { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; align-items:end; }
+  label { display:block; font-size:12px; color:var(--dim); margin-bottom:4px; }
+  select,input { width:100%; background:#0c0e12; border:1px solid var(--line); color:var(--ink); border-radius:6px; padding:8px; }
+  .gpubox { display:flex; gap:14px; align-items:center; padding-top:22px; }
+  .gpubox label { display:flex; gap:6px; align-items:center; color:var(--ink); margin:0; }
+  button { background:var(--accent); color:#06101f; border:0; border-radius:6px; padding:9px 16px; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--dim); padding:4px 10px; font-weight:500; }
+  button:hover { filter:brightness(1.08); }
+  .err { color:var(--bad); font-size:12px; min-height:16px; }
+  code { color:var(--accent); }
+  .msg { margin:6px 0; padding:7px 11px; border-radius:7px; white-space:pre-wrap; word-break:break-word; }
+  .msg.user { background:rgba(110,168,254,.10); }
+  .msg.assistant { background:#14171e; }
+  .msg b { color:var(--dim); text-transform:none; font-weight:600; }
+  .msg pre.code { background:#0a0c10; border:1px solid var(--line); border-radius:6px; padding:10px; overflow:auto; margin:8px 0; }
+  .msg pre.code code { color:#cdd6e4; white-space:pre; }
+  .msg code.ic { background:#0a0c10; border:1px solid var(--line); border-radius:4px; padding:1px 5px; color:var(--accent); }
+  .msg ul, .msg ol { margin:6px 0 6px 2px; padding-left:20px; }
+  .msg h2, .msg h3, .msg h4 { margin:10px 0 4px; }
+  .meta { color:var(--dim); font-size:11px; margin:1px 0 9px 4px; }
+  .meta b { color:var(--ok); }
+  #chatstats { color:var(--dim); font-size:12px; display:flex; align-items:center; gap:14px; margin-bottom:8px; min-height:22px; flex-wrap:wrap; }
+  details.reason { margin:2px 0 8px; border-left:2px solid var(--line); padding-left:8px; }
+  details.reason summary { color:var(--dim); font-size:12px; cursor:pointer; }
+  details.reason > div { color:var(--dim); font-size:12.5px; margin-top:6px; opacity:.85; }
+  /* progress + errors */
+  .load-bar { height:4px; background:#0c0e12; border-radius:3px; overflow:hidden; margin-top:5px; max-width:150px; }
+  .load-bar > i { display:block; height:100%; width:32%; background:var(--warn); border-radius:3px; animation:lc-slide 1.1s ease-in-out infinite; }
+  @keyframes lc-slide { 0%{transform:translateX(-110%)} 100%{transform:translateX(330%)} }
+  .errline { color:var(--bad); font-size:11px; margin-top:3px; max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* Tufte: data-ink only — solid single hue, accent the focal point, no gradients */
+  .gpu .bar > i { background:var(--accent); }
+  .gpu .bar > i.hot { background:var(--bad); }
+  .spark-dot { fill:var(--accent); }
+  /* live activity */
+  .livemodel { border:1px solid var(--line); border-radius:8px; padding:12px; margin-bottom:12px; }
+  .livemodel:last-child { margin-bottom:0; }
+  .livehead { display:flex; align-items:center; gap:12px; margin-bottom:10px; flex-wrap:wrap; }
+  .livehead .ctxnote { color:var(--dim); font-size:12px; }
+  .slots-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:10px; }
+  .slot { border:1px solid var(--line); border-radius:7px; padding:9px 11px; background:#0c0e12; }
+  .slot.busy { border-color:rgba(57,217,138,.45); }
+  .slot .slot-h { display:flex; justify-content:space-between; font-size:12px; margin-bottom:6px; }
+  .slot .slot-h span { color:var(--dim); }
+  .slot.busy .slot-h span { color:var(--ok); }
+  .slot .bar { height:6px; background:#181b22; border-radius:4px; overflow:hidden; }
+  .slot .bar > i { display:block; height:100%; background:var(--accent); }
+  .slot .bar > i.hot { background:var(--bad); }
+  .slot .meta { display:flex; justify-content:space-between; color:var(--dim); font-size:11px; margin-top:5px; }
+  /* pool (federated nodes) */
+  .poolnodes { display:flex; gap:14px; flex-wrap:wrap; }
+  .poolnode { flex:1; min-width:260px; border:1px solid var(--line); border-radius:8px; padding:12px; }
+  .poolnode.self { border-color:rgba(110,168,254,.55); }
+  .poolnode h3 { margin:0 0 9px; font-size:14px; font-weight:600; display:flex; align-items:center; gap:8px; }
+  .poolnode .dot { width:8px; height:8px; border-radius:50%; background:var(--ok); display:inline-block; }
+  .poolnode .selfbadge { font-size:11px; color:var(--accent); background:rgba(110,168,254,.12); padding:1px 7px; border-radius:10px; }
+  .poolnode .grow { font-size:12px; color:var(--dim); margin-bottom:6px; }
+  .poolnode .grow .bar { height:6px; background:#0c0e12; border-radius:4px; overflow:hidden; margin-top:3px; }
+  .poolnode .grow .bar > i { display:block; height:100%; background:var(--accent); }
+  .poolnode .grow .bar > i.hot { background:var(--bad); }
+  .poolnode .pmodels { margin-top:8px; display:flex; gap:5px; flex-wrap:wrap; }
+  .poolnode .pmodels code { font-size:11px; background:#0a0c10; border:1px solid var(--line); border-radius:4px; padding:1px 5px; color:var(--accent); display:inline-flex; align-items:center; gap:5px; }
+  .poolnode .pmodels code .px { color:var(--dim); cursor:pointer; font-size:10px; line-height:1; }
+  .poolnode .pmodels code .px:hover { color:var(--bad); }
+  .poolctl { margin-top:11px; display:flex; gap:8px; flex-wrap:wrap; }
+  .poolform { border:1px solid var(--accent); border-radius:8px; padding:12px; margin-top:14px; background:#0c0e12; }
+  .poolform .pf-row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .poolform select, .poolform input { background:#0a0c10; }
+</style>
+</head>
+<body>
+<header>
+  <h1>llama-chip</h1>
+  <span class="sub" id="backend">loading…</span>
+  <span class="sub" style="margin-left:auto" id="clock"></span>
+</header>
+<main>
+  <section class="panel">
+    <h2>GPUs</h2>
+    <div class="gpus" id="gpus"></div>
+  </section>
+
+  <section class="panel hide" id="poolSec">
+    <h2>Pool <span style="color:var(--dim);font-weight:400;text-transform:none">— every node in the federation (GPUs + models, manage any over the mesh)</span></h2>
+    <div class="poolnodes" id="poolnodes"></div>
+    <div id="poolform"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Profiles <span style="color:var(--dim);font-weight:400;text-transform:none">— switch the whole GPU layout</span></h2>
+    <div id="profiles" style="display:flex;gap:10px;flex-wrap:wrap"><span style="color:var(--dim)">none configured</span></div>
+  </section>
+
+  <section class="panel">
+    <h2>Loaded models</h2>
+    <table><thead><tr><th>Name</th><th>Model</th><th>GPUs</th><th>Ctx</th><th>State</th><th>Restarts</th><th></th></tr></thead>
+    <tbody id="slots"><tr><td colspan="7" style="color:var(--dim)">none loaded</td></tr></tbody></table>
+  </section>
+
+  <section class="panel">
+    <h2>Live activity <span style="color:var(--dim);font-weight:400;text-transform:none">— in-flight requests across parallel slots (every client, not just this UI)</span></h2>
+    <div id="live"><span style="color:var(--dim)">no models loaded</span></div>
+  </section>
+
+  <section class="panel">
+    <h2>Load a model</h2>
+    <form id="loadform">
+      <div><label>Model</label><select id="model"></select></div>
+      <div><label>Alias (optional)</label><input id="alias" placeholder="e.g. qwen"></div>
+      <div><label>Context <button type="button" class="ghost" style="padding:0 6px;font-size:11px" onclick="guessCtx()" title="estimate the largest context that fits">guess&nbsp;max</button></label><input id="ctx" type="number" value="32768" step="1024"></div>
+      <div><label>Parallel</label><input id="par" type="number" value="1" min="1" step="1" title="--parallel: concurrent request slots. total context = context × parallel"></div>
+      <div><label>KV cache</label><select id="kv"><option>q8_0</option><option>f16</option><option>q4_0</option></select></div>
+      <div class="gpubox">
+        <span style="color:var(--dim);font-size:12px">GPUs</span>
+        <label><input type="checkbox" class="gpu-cb" value="0" checked> 0</label>
+        <label><input type="checkbox" class="gpu-cb" value="1"> 1</label>
+      </div>
+      <div><button type="submit">Load</button></div>
+    </form>
+    <div class="err" id="err"></div>
+    <p style="color:var(--dim);font-size:12px">Two GPUs checked = one model split across both. One = pinned to that card.</p>
+  </section>
+
+  <section class="panel">
+    <h2>Chat test <span style="color:var(--dim);font-weight:400;text-transform:none">— session-based, against a loaded model</span></h2>
+    <div style="display:flex;gap:10px;margin-bottom:10px">
+      <select id="chatmodel" style="max-width:240px"></select>
+      <input id="chatmax" type="number" value="4096" step="512" min="64" title="max tokens — reasoning models need room (2000+)" style="max-width:110px">
+      <button class="ghost" type="button" onclick="newChat()">New session</button>
+    </div>
+    <div id="chatstats"></div>
+    <div id="chatlog" style="border:1px solid var(--line);border-radius:8px;padding:12px;min-height:120px;max-height:360px;overflow:auto;background:#0c0e12"></div>
+    <form id="chatform" style="display:flex;gap:10px;margin-top:10px">
+      <input id="chatinput" placeholder="message… (Enter to send)" style="flex:1" autocomplete="off">
+      <button type="submit" id="chatsend">Send</button>
+    </form>
+  </section>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const fmtGB = b => (b/(1<<30)).toFixed(1)+' GB';
+const fmtK = n => n>=1024 ? Math.round(n/1024)+'k' : (''+Math.round(n||0));
+
+async function refreshGPU() {
+  try {
+    const r = await (await fetch('/api/gpu')).json();
+    $('#gpus').innerHTML = (r.gpus||[]).map(g => {
+      const pct = g.mem_total_mib ? Math.round(100*g.mem_used_mib/g.mem_total_mib) : 0;
+      return `<div class="gpu"><b>GPU ${g.index}</b> · ${g.name||''}
+        <div class="bar"><i class="${pct>85?'hot':''}" style="width:${pct}%"></i></div>
+        <div class="meta"><span>${g.mem_used_mib} / ${g.mem_total_mib} MiB</span><span>${g.util_pct}% · ${g.temp_c}°C</span></div></div>`;
+    }).join('') || '<span style="color:var(--dim)">no NVIDIA GPUs reported</span>';
+  } catch(e){}
+}
+const startSince = {};
+async function refreshSlots() {
+  try {
+    const r = await (await fetch('/api/status')).json();
+    const rows = (r.slots||[]);
+    const live = new Set(rows.map(s=>s.name));
+    Object.keys(startSince).forEach(n=>{ if(!live.has(n)) delete startSince[n]; });
+    $('#slots').innerHTML = rows.length ? rows.map(s => {
+      const short = escapeHtml((s.model||'').split('/').pop());
+      let cell = `<span class="pill s-${s.state}">${s.state}</span>`;
+      if (s.state==='starting' || s.state==='stopped') {
+        if(!startSince[s.name]) startSince[s.name]=Date.now();
+        const el = Math.round((Date.now()-startSince[s.name])/1000);
+        cell += ` <span style="color:var(--dim)">${el}s</span><div class="load-bar"><i></i></div>`;
+      } else delete startSince[s.name];
+      if (s.state==='crashed' && s.last_err)
+        cell += `<div class="errline" title="${escapeHtml(s.last_err).replace(/"/g,'&quot;')}">${escapeHtml(s.last_err).slice(0,90)}</div>`;
+      const par = s.parallel||1;
+      const ctxCell = s.ctx_size
+        ? (par>1 ? `${fmtK(Math.round(s.ctx_size/par))}/slot <span style="color:var(--dim)">×${par}</span>` : fmtK(s.ctx_size))
+        : '—';
+      return `<tr>
+        <td><b>${escapeHtml(s.name)}</b></td><td><code title="${escapeHtml(s.model)}">${short}</code></td><td>[${(s.gpus||[]).join(', ')}]</td>
+        <td title="${s.ctx_size?s.ctx_size.toLocaleString()+' total':''}">${ctxCell}</td><td>${cell}</td>
+        <td>${s.restarts}</td><td><button class="ghost" onclick="unload('${escapeHtml(s.name)}')">unload</button></td></tr>`;
+    }).join('') : '<tr><td colspan="7" style="color:var(--dim)">none loaded</td></tr>';
+  } catch(e){}
+}
+// --- live activity (polls /api/live; derives tok/s from successive snapshots) ---
+let livePrev = {};
+async function refreshLive() {
+  let r; try { r = await (await fetch('/api/live')).json(); } catch(e){ return; }
+  const now = r.at_ms || Date.now();
+  const models = r.models || [];
+  if (!models.length) { $('#live').innerHTML='<span style="color:var(--dim)">no models loaded</span>'; livePrev={}; return; }
+  const seen = new Set();
+  $('#live').innerHTML = models.map(m => {
+    let genTps = 0, promptTps = 0;
+    const slotsHtml = (m.slots||[]).map(s => {
+      const key = m.name+':'+s.id; seen.add(key);
+      const prev = livePrev[key];
+      if (prev && prev.task===s.id_task) {           // same request still in this slot → real delta
+        const dt = (now-prev.t)/1000;
+        if (dt>0) { genTps += Math.max(0,(s.decoded||0)-prev.decoded)/dt; promptTps += Math.max(0,(s.prompt_processed||0)-prev.prompt_processed)/dt; }
+      }
+      livePrev[key] = { task:s.id_task, decoded:s.decoded||0, prompt_processed:s.prompt_processed||0, t:now };
+      const used = (s.prompt_tokens||0)+(s.decoded||0), pct = s.n_ctx ? Math.round(100*used/s.n_ctx) : 0;
+      return `<div class="slot ${s.processing?'busy':''}">
+        <div class="slot-h"><b>slot ${s.id}</b><span>${s.processing?'● working':'○ idle'}</span></div>
+        <div class="bar"><i class="${pct>90?'hot':''}" style="width:${Math.min(100,pct)}%"></i></div>
+        <div class="meta"><span>ctx ${used.toLocaleString()} / ${fmtK(s.n_ctx)}</span><span>${pct}%</span></div>
+        <div class="meta"><span>in ${(s.prompt_tokens||0).toLocaleString()}${s.prompt_cache?` <span style="color:var(--ok)">(${s.prompt_cache} cached)</span>`:''}</span><span>out ${(s.decoded||0).toLocaleString()}</span></div>
+      </div>`;
+    }).join('') || `<span style="color:var(--dim)">${escapeHtml(m.err||'no slot detail')}</span>`;
+    const rate = (m.active>0 || genTps>0.5)
+      ? `<b style="color:var(--ok)">${genTps.toFixed(0)}</b> tok/s out${promptTps>1?` · <b>${promptTps.toFixed(0)}</b> tok/s in`:''}`
+      : '<span style="color:var(--dim)">idle</span>';
+    return `<div class="livemodel">
+      <div class="livehead"><b>${escapeHtml(m.name)}</b>
+        <span class="pill ${m.active>0?'s-healthy':'s-stopped'}">${m.active}/${m.parallel} active</span>
+        <span class="ctxnote">${fmtK(m.ctx_per_slot)}/slot × ${m.parallel}</span>
+        <span style="margin-left:auto">${rate}</span></div>
+      <div class="slots-grid">${slotsHtml}</div></div>`;
+  }).join('');
+  Object.keys(livePrev).forEach(k => { if(!seen.has(k)) delete livePrev[k]; }); // forget vanished slots
+}
+async function loadModels() {
+  try {
+    const r = await (await fetch('/api/models')).json();
+    $('#model').innerHTML = (r.models||[]).map(m => `<option value="${m.id}">${m.id} (${fmtGB(m.bytes)})</option>`).join('');
+    const b = await (await fetch('/api/backends')).json();
+    const runnable = (b.backends||[]).filter(x=>x.complete);
+    $('#backend').textContent = runnable.length ? `backend: ${runnable[0].variant} ${runnable[0].version}` : 'no runnable backend';
+  } catch(e){}
+}
+async function unload(name) {
+  await fetch('/api/unload', {method:'POST', body: JSON.stringify({name})});
+  refreshSlots();
+}
+async function loadProfiles() {
+  try {
+    const r = await (await fetch('/api/profiles')).json();
+    const ps = r.profiles||[];
+    $('#profiles').innerHTML = ps.length
+      ? ps.map(p => `<button onclick="applyProfile('${p}')">${p}</button>`).join('')
+      : '<span style="color:var(--dim)">none configured (add "profiles" to config.json)</span>';
+  } catch(e){}
+}
+async function applyProfile(name) {
+  $('#err').textContent='';
+  const res = await fetch('/api/profile', {method:'POST', body: JSON.stringify({name})});
+  if (!res.ok) { const j = await res.json().catch(()=>({})); $('#err').textContent=(j.error&&j.error.message)||'profile failed'; }
+  refreshSlots();
+}
+$('#loadform').addEventListener('submit', async e => {
+  e.preventDefault(); $('#err').textContent='';
+  const gpus = [...document.querySelectorAll('.gpu-cb:checked')].map(c=>+c.value);
+  if (!gpus.length) { $('#err').innerHTML='<span style="color:var(--bad)">pick at least one GPU</span>'; return; }
+  const body = { model:$('#model').value, alias:$('#alias').value||undefined, gpus, ctx_size:+$('#ctx').value, parallel:+$('#par').value||1, kv_cache:$('#kv').value };
+  const res = await fetch('/api/load', {method:'POST', body: JSON.stringify(body)});
+  if (!res.ok) { const j = await res.json().catch(()=>({})); $('#err').innerHTML='<span style="color:var(--bad)">'+escapeHtml((j.error&&j.error.message)||('load failed: '+res.status))+'</span>'; }
+  else { $('#err').innerHTML='<span style="color:var(--ok)">loading '+escapeHtml(body.alias||body.model)+'…</span>'; }
+  refreshSlots();
+});
+async function guessCtx(){
+  const model=$('#model').value, gpus=[...document.querySelectorAll('.gpu-cb:checked')].map(c=>c.value).join(','), kv=$('#kv').value;
+  if(!model||!gpus){ $('#err').innerHTML='<span style="color:var(--warn)">pick a model and GPU first</span>'; return; }
+  $('#err').textContent='estimating…';
+  try{
+    const r=await (await fetch(`/api/guess-context?model=${encodeURIComponent(model)}&gpus=${gpus}&kv=${kv}`)).json();
+    if(r.max_ctx){ const par=Math.max(1,+$('#par').value||1); $('#ctx').value=Math.floor(r.max_ctx/par/4096)*4096||4096;
+      $('#err').innerHTML=`<span style="color:var(--dim)">~${(+$('#ctx').value).toLocaleString()}/slot (×${par}) · free ${r.free_mib} MiB, model ${r.model_mib} MiB · ${r.note}</span>`; }
+    else $('#err').innerHTML='<span style="color:var(--warn)">'+((r.error&&r.error.message)||'could not estimate')+'</span>';
+  }catch(e){ $('#err').textContent='guess failed: '+e.message; }
+}
+// --- session-based chat test ---
+let chatSession = [];
+const escapeHtml = s => (s||'').replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+// compact markdown -> HTML (split on code fences so blocks are never mangled)
+function renderMarkdown(src){
+  const esc = t => (t||'').replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  const parts = (src||'').split(/```/);
+  let out = '';
+  for (let i=0;i<parts.length;i++){
+    if (i%2===1){
+      const code = parts[i].replace(/^[A-Za-z0-9_+-]*\n?/, '').replace(/\n$/,'');
+      out += `<pre class="code"><code>${esc(code)}</code></pre>`;
+    } else {
+      let s2 = esc(parts[i]);
+      s2 = s2.replace(/`([^`\n]+)`/g,'<code class="ic">$1</code>');
+      s2 = s2.replace(/^### (.*)$/gm,'<h4>$1</h4>').replace(/^## (.*)$/gm,'<h3>$1</h3>').replace(/^# (.*)$/gm,'<h2>$1</h2>');
+      s2 = s2.replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>').replace(/\*([^*\n]+)\*/g,'<i>$1</i>');
+      s2 = s2.replace(/^(?:[-*] .+(?:\n|$))+/gm, b=>'<ul>'+b.trim().split('\n').map(l=>`<li>${l.replace(/^[-*] /,'')}</li>`).join('')+'</ul>');
+      s2 = s2.replace(/^(?:\d+\. .+(?:\n|$))+/gm, b=>'<ol>'+b.trim().split('\n').map(l=>`<li>${l.replace(/^\d+\.\s/,'')}</li>`).join('')+'</ol>');
+      s2 = s2.replace(/\n{2,}/g,'<br><br>').replace(/\n/g,'<br>');
+      out += s2;
+    }
+  }
+  return out;
+}
+function sparkline(xs){
+  const w=128,h=22,n=xs.length; if(n<2) return '';
+  const mx=Math.max(...xs), mn=Math.min(...xs), rng=(mx-mn)||1;
+  const X=i=>(i/(n-1)*w), Y=v=>(h-3-((v-mn)/rng)*(h-6));
+  const pts = xs.map((v,i)=>`${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ');
+  // Tufte sparkline: thin subtle reference line, accent dot on the latest value (the focal point)
+  return `<svg width="${w}" height="${h}" style="vertical-align:middle">`+
+    `<polyline points="${pts}" fill="none" stroke="#5a6373" stroke-width="1"/>`+
+    `<circle class="spark-dot" cx="${X(n-1).toFixed(1)}" cy="${Y(xs[n-1]).toFixed(1)}" r="2.2"/></svg>`;
+}
+function renderStats(){
+  const xs = chatSession.filter(m=>m.role==='assistant'&&m.stats&&m.stats.tps>0).map(m=>m.stats.tps);
+  if(!xs.length){ $('#chatstats').innerHTML=''; return; }
+  const avg = xs.reduce((a,b)=>a+b,0)/xs.length, last = xs[xs.length-1];
+  const tok = chatSession.reduce((a,m)=>a+((m.stats&&m.stats.tokens)||0),0);
+  $('#chatstats').innerHTML =
+    `<span>last <b style="color:var(--ok)">${last.toFixed(1)}</b> tok/s</span>`+
+    `<span>avg ${avg.toFixed(1)} over ${xs.length}</span>`+
+    `<span>${tok.toLocaleString()} tok</span>`+
+    `<span title="generation tok/s over the session">${sparkline(xs)}</span>`;
+}
+function renderChat() {
+  $('#chatlog').innerHTML = chatSession.length ? chatSession.map(m=>{
+    if (m.role==='user') return `<div class="msg user"><b>you:</b> ${escapeHtml(m.content)}</div>`;
+    const t = m.stats;
+    const meta = t ? `<div class="meta"><b>${t.tps.toFixed(1)} tok/s</b> · ${t.tokens} tok · ${(t.ms/1000).toFixed(1)}s${t.ptps?` · prompt ${t.ptps.toFixed(0)} tok/s`:''}${t.cut?' · <span style="color:var(--warn)">cut off — raise max tokens</span>':''}</div>` : '';
+    const wc = m.reasoning ? m.reasoning.trim().split(/\s+/).length : 0;
+    const reason = m.reasoning ? `<details class="reason"><summary>💭 reasoning (${wc} words)</summary><div>${renderMarkdown(m.reasoning)}</div></details>` : '';
+    const body = m.content ? renderMarkdown(m.content) : (m.reasoning ? '<i style="color:var(--dim)">(thinking — no final answer in budget; raise max tokens)</i>' : escapeHtml(m.content));
+    return `<div class="msg assistant"><b>model:</b> ${reason}${body}</div>${meta}`;
+  }).join('') : '<span style="color:var(--dim)">no messages — pick a loaded model and say hi (the whole conversation is sent each turn)</span>';
+  $('#chatlog').scrollTop = $('#chatlog').scrollHeight;
+  renderStats();
+}
+function newChat(){ chatSession=[]; renderChat(); }
+const chatOpt = (model, node) => `<option value="${escapeHtml(model)}" data-node="${escapeHtml(node)}">${escapeHtml(model)}${node?' — '+escapeHtml(node):''}</option>`;
+// chat picker, federation-aware: this node's models first, then each remote node as an optgroup.
+// A remote pick carries data-node, so the chat request pins to that node (?node=) — letting you
+// test a chosen remote even when a same-named model is loaded locally.
+async function refreshChatModels() {
+  let r; try { r = await (await fetch('/api/pool')).json(); } catch(e){ return refreshChatModelsLocal(); }
+  const nodes = r.nodes || [];
+  if (!nodes.length) return refreshChatModelsLocal();
+  const sel = $('#chatmodel'), prevOpt = sel.selectedOptions[0];
+  const prev = sel.value, prevNode = prevOpt ? (prevOpt.dataset.node||'') : '';
+  const selfN = nodes.find(n=>n.is_self) || nodes[0];
+  let html = (selfN.models||[]).map(m=>chatOpt(m,'')).join('');
+  for (const n of nodes) {
+    if (n===selfN || n.is_self || !(n.models||[]).length) continue;
+    html += `<optgroup label="${escapeHtml(n.name)} (remote)">${n.models.map(m=>chatOpt(m,n.name)).join('')}</optgroup>`;
+  }
+  sel.innerHTML = html || '<option value="">(load a model first)</option>';
+  for (const o of sel.options){ if(o.value===prev && (o.dataset.node||'')===prevNode){ o.selected=true; break; } }
+}
+function refreshChatModelsLocal() {
+  fetch('/api/status').then(r=>r.json()).then(r=>{
+    const cur = $('#chatmodel').value;
+    const opts = (r.slots||[]).filter(s=>s.state==='healthy').map(s=>chatOpt(s.name,''));
+    $('#chatmodel').innerHTML = opts.join('') || '<option value="">(load a model first)</option>';
+    if (cur){ for(const o of $('#chatmodel').options){ if(o.value===cur){o.selected=true;break;} } }
+  }).catch(()=>{});
+}
+$('#chatform').addEventListener('submit', async e => {
+  e.preventDefault();
+  const optEl = $('#chatmodel').selectedOptions[0];
+  const model = $('#chatmodel').value, node = optEl ? (optEl.dataset.node||'') : '', text = $('#chatinput').value.trim();
+  if (!model || !text) return;
+  chatSession.push({role:'user', content:text}); $('#chatinput').value='';
+  const am = {role:'assistant', content:'', reasoning:'', stats:null}; // streamed in place
+  chatSession.push(am); renderChat();
+  $('#chatsend').disabled=true;
+  const t0 = performance.now(); let toks=0, lastRender=0, finalT=null, fin=null;
+  const draw = force => { const now=performance.now(); if(!force && now-lastRender<60) return; lastRender=now;
+    const secs=(now-t0)/1000;
+    am.stats = { tps: finalT?finalT.predicted_per_second:(secs>0?toks/secs:0), tokens: finalT?finalT.predicted_n:toks,
+                 ms: finalT?finalT.predicted_ms:secs*1000, ptps: finalT?finalT.prompt_per_second:0, cut: fin==='length' };
+    renderChat(); };
+  try {
+    const res = await fetch('/v1/chat/completions'+(node?`?node=${encodeURIComponent(node)}`:''), {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({model, messages: chatSession.slice(0,-1), temperature:0.7, max_tokens:(+$('#chatmax').value||4096), stream:true})});
+    if (!res.ok || !res.body) { const j=await res.json().catch(()=>({})); am.content=(j.error&&j.error.message)||('error '+res.status); }
+    else {
+      const reader=res.body.getReader(), dec=new TextDecoder(); let buf='';
+      while(true){ const {done,value}=await reader.read(); if(done) break;
+        buf += dec.decode(value,{stream:true}); let nl;
+        while((nl=buf.indexOf('\n'))>=0){ const line=buf.slice(0,nl).trim(); buf=buf.slice(nl+1);
+          if(!line.startsWith('data:')) continue; const data=line.slice(5).trim(); if(data==='[DONE]') continue;
+          let ch; try{ ch=JSON.parse(data); }catch(_){ continue; }
+          const c=(ch.choices&&ch.choices[0])||{}, d=c.delta||{};
+          if(d.reasoning_content){ am.reasoning+=d.reasoning_content; toks++; }
+          if(d.content){ am.content+=d.content; toks++; }
+          if(c.finish_reason) fin=c.finish_reason;
+          if(ch.timings) finalT=ch.timings;
+          draw(false);
+        }
+      }
+      if(!am.content && !am.reasoning) am.content='(no response)';
+    }
+  } catch(err){ am.content='error: '+err.message; }
+  draw(true); $('#chatsend').disabled=false; renderChat();
+});
+
+// --- pool (federated nodes: this node + every peer, GPUs + models over the mesh) + remote mgmt ---
+let poolSelf = '';
+let poolFormNode = null; // node whose Load form is open (in #poolform, decoupled from the 2s refresh)
+const esc1 = s => (s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'"); // safe for inline onclick=' '
+const isSelfNode = node => !!poolSelf && node.toLowerCase()===poolSelf.toLowerCase();
+
+// remoteCall routes a management op to a node: self → the local /api/<op>, any peer → /api/remote
+// (proxied over the mesh). One code path manages every node in the pool.
+function remoteCall(node, op, opts={}) {
+  const self = isSelfNode(node), method = opts.method || 'POST';
+  if (method === 'GET') {
+    const url = self ? '/api/'+op+(opts.qs?('?'+opts.qs):'')
+                     : `/api/remote?node=${encodeURIComponent(node)}&op=${op}${opts.qs?('&'+opts.qs):''}`;
+    return fetch(url);
+  }
+  const url = self ? '/api/'+op : `/api/remote?node=${encodeURIComponent(node)}&op=${op}`;
+  return fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(opts.body||{})});
+}
+
+async function refreshPool() {
+  let r; try { r = await (await fetch('/api/pool')).json(); } catch(e){ return; }
+  poolSelf = r.self || poolSelf;
+  const nodes = r.nodes || [];
+  if (nodes.length <= 1) { $('#poolSec').classList.add('hide'); if(poolFormNode) closePoolForm(); return; } // only show a real pool
+  $('#poolSec').classList.remove('hide');
+  $('#poolnodes').innerHTML = nodes.map(n => {
+    const gpus = (n.gpus||[]).map(g => {
+      const pct = g.mem_total ? Math.round(100*g.mem_used/g.mem_total) : 0;
+      const free = (g.mem_total||0)-(g.mem_used||0);
+      return `<div class="grow">${escapeHtml(g.name||('GPU'+g.index))} · ${free.toLocaleString()}/${(g.mem_total||0).toLocaleString()} MiB free${g.util?` · ${g.util}%`:''}
+        <div class="bar"><i class="${pct>85?'hot':''}" style="width:${Math.min(100,pct)}%"></i></div></div>`;
+    }).join('') || '<div class="grow">no GPUs reported</div>';
+    const models = (n.models||[]).length
+      ? (n.models||[]).map(m=>`<code>${escapeHtml(m)}<a class="px" title="unload ${escapeHtml(m)}" onclick="poolUnload('${esc1(n.name)}','${esc1(m)}')">✕</a></code>`).join('')
+      : '<span style="color:var(--dim);font-size:12px">no models loaded</span>';
+    return `<div class="poolnode ${n.is_self?'self':''}">
+      <h3><span class="dot"></span>${escapeHtml(n.name)}${n.is_self?'<span class="selfbadge">this node</span>':''}</h3>
+      ${gpus}
+      <div class="pmodels">${models}</div>
+      <div class="poolctl">
+        <button class="ghost" onclick="poolLoadForm('${esc1(n.name)}')">＋ Load…</button>
+        <button class="ghost" onclick="poolUnloadAll('${esc1(n.name)}')">Unload all</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function closePoolForm(){ poolFormNode=null; $('#poolform').innerHTML=''; }
+
+// poolLoadForm opens the per-node management form below the cards: lazily fetches THAT node's GGUFs,
+// profiles, and GPUs (via remoteCall), then renders a load form + profile switches.
+async function poolLoadForm(node) {
+  poolFormNode = node;
+  $('#poolform').innerHTML = `<div class="poolform" style="color:var(--dim)">loading ${escapeHtml(node)}…</div>`;
+  let models=[], profiles=[], gpus=[];
+  try { models = ((await (await remoteCall(node,'models',{method:'GET'})).json()).models)||[]; } catch(e){}
+  try { profiles = ((await (await remoteCall(node,'profiles',{method:'GET'})).json()).profiles)||[]; } catch(e){}
+  try { const pr=await (await fetch('/api/pool')).json(); const nd=(pr.nodes||[]).find(x=>x.name.toLowerCase()===node.toLowerCase()); gpus=(nd&&nd.gpus)||[]; } catch(e){}
+  if (poolFormNode !== node) return; // user closed / switched while we were fetching
+  const gpuCbs = (gpus.length?gpus:[{index:0},{index:1}]).map(g=>
+    `<label style="display:inline-flex;gap:4px;align-items:center;color:var(--ink);margin:0"><input type="checkbox" class="pf-gpu" value="${g.index}" ${g.index===0?'checked':''}> ${g.index}</label>`).join('');
+  const profBtns = profiles.length
+    ? `<div style="margin-top:10px"><span style="color:var(--dim);font-size:12px">profiles: </span>${profiles.map(p=>`<button class="ghost" onclick="poolApplyProfile('${esc1(node)}','${esc1(p)}')">${escapeHtml(p)}</button>`).join(' ')}</div>`
+    : '';
+  $('#poolform').innerHTML = `<div class="poolform">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <b>Manage ${escapeHtml(node)}${isSelfNode(node)?' · this node':''}</b>
+      <button class="ghost" onclick="closePoolForm()">close ✕</button>
+    </div>
+    <div class="pf-row">
+      <select id="pf-model" style="flex:2;min-width:180px">${models.map(m=>`<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)} (${fmtGB(m.bytes)})</option>`).join('')||'<option value="">(no GGUFs on this node)</option>'}</select>
+      <input id="pf-alias" placeholder="alias (optional)" style="flex:1;min-width:100px">
+      <input id="pf-ctx" type="number" value="32768" step="1024" title="context" style="width:108px">
+      <input id="pf-par" type="number" value="1" min="1" step="1" title="parallel" style="width:66px">
+      <select id="pf-kv" style="width:88px"><option>q8_0</option><option>f16</option><option>q4_0</option></select>
+      <span style="display:inline-flex;gap:10px;align-items:center"><span style="color:var(--dim);font-size:12px">GPU</span>${gpuCbs}</span>
+      <button onclick="poolDoLoad('${esc1(node)}')">Load</button>
+    </div>
+    ${profBtns}
+    <div class="err" id="pf-err"></div>
+  </div>`;
+}
+
+async function poolDoLoad(node) {
+  const gpus=[...document.querySelectorAll('.pf-gpu:checked')].map(c=>+c.value);
+  if (!gpus.length) { $('#pf-err').innerHTML='<span style="color:var(--bad)">pick at least one GPU</span>'; return; }
+  const body={ model:$('#pf-model').value, alias:$('#pf-alias').value||undefined, gpus, ctx_size:+$('#pf-ctx').value, parallel:+$('#pf-par').value||1, kv_cache:$('#pf-kv').value };
+  $('#pf-err').textContent='loading…';
+  try {
+    const res=await remoteCall(node,'load',{body});
+    if (!res.ok) { const j=await res.json().catch(()=>({})); $('#pf-err').innerHTML='<span style="color:var(--bad)">'+escapeHtml((j.error&&j.error.message)||('load failed: '+res.status))+'</span>'; }
+    else { $('#pf-err').innerHTML='<span style="color:var(--ok)">loading '+escapeHtml(body.alias||body.model)+' on '+escapeHtml(node)+'…</span>'; setTimeout(refreshPool, 900); }
+  } catch(e){ $('#pf-err').textContent='load failed: '+e.message; }
+}
+
+async function poolUnload(node, model) {
+  try { await remoteCall(node,'unload',{body:{name:model}}); } catch(e){}
+  refreshPool();
+}
+async function poolUnloadAll(node) {
+  try { await remoteCall(node,'unload-all',{body:{}}); } catch(e){}
+  refreshPool();
+}
+async function poolApplyProfile(node, name) {
+  const errEl=$('#pf-err'); if(errEl) errEl.textContent='applying '+name+'…';
+  try {
+    const res=await remoteCall(node,'profile',{body:{name}});
+    if (!res.ok && errEl) { const j=await res.json().catch(()=>({})); errEl.innerHTML='<span style="color:var(--bad)">'+escapeHtml((j.error&&j.error.message)||'profile failed')+'</span>'; }
+    else { if(errEl) errEl.innerHTML='<span style="color:var(--ok)">applying '+escapeHtml(name)+' on '+escapeHtml(node)+'…</span>'; setTimeout(refreshPool, 900); }
+  } catch(e){ if(errEl) errEl.textContent='profile failed: '+e.message; }
+}
+setInterval(()=>{ refreshGPU(); refreshSlots(); refreshChatModels(); refreshPool(); $('#clock').textContent=new Date().toLocaleTimeString(); }, 2000);
+setInterval(refreshLive, 1000); // faster cadence so tok/s reads live
+loadModels(); loadProfiles(); refreshGPU(); refreshSlots(); refreshChatModels(); refreshLive(); refreshPool(); renderChat();
+</script>
+</body>
+</html>

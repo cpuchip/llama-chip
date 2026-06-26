@@ -1,0 +1,31 @@
+{
+  "backend": "cuda12",
+  "listen": ":8090",
+  "base_port": 9100,
+  "slots": [],
+  "profiles": {
+    "dance": [
+      { "model": "Qwen3.6-27B-Q4_K_M",        "alias": "qwen3.6-27b", "gpus": [0], "ctx_size": 196608, "parallel": 1, "kv_cache": "q8_0" },
+      { "model": "gemma-4-26B-A4B-it-Q4_K_M", "alias": "gemma-4-26b-a4b",   "gpus": [1], "ctx_size": 425984, "parallel": 2, "kv_cache": "q8_0" }
+    ],
+    "dance-moe": [
+      { "model": "Qwen3.6-35B-A3B-Q4_K_M",    "alias": "qwen3.6-35b-a3b", "gpus": [0], "ctx_size": 245760, "parallel": 2, "kv_cache": "q8_0" },
+      { "model": "gemma-4-26B-A4B-it-Q4_K_M", "alias": "gemma-4-26b-a4b",       "gpus": [1], "ctx_size": 425984, "parallel": 2, "kv_cache": "q8_0" }
+    ],
+    "mythos": [
+      { "model": "Qwythos-9B-Claude-Mythos-5-1M-Q4_K_M", "alias": "mythos", "gpus": [0], "ctx_size": 32768, "kv_cache": "q8_0" },
+      { "model": "Qwable-9B-Claude-Fable-5-Q4_K_M",       "alias": "fable",  "gpus": [1], "ctx_size": 32768, "kv_cache": "q8_0" }
+    ],
+    "big-single": [
+      { "model": "Qwen3.6-35B-A3B", "alias": "big", "gpus": [0, 1], "ctx_size": 131072, "split_mode": "layer", "kv_cache": "q8_0" }
+    ]
+  },
+
+  "federation": {
+    "node_name": "this-node",
+    "advertise": "http://100.84.0.2:8090",
+    "token": "",
+    "poll_interval_sec": 5,
+    "peers": []
+  }
+}

@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>llama-chip hub</title>
+<style>
+  :root { --ink:#1a1a1a; --dim:#6b6b6b; --line:#e3e0d8; --bg:#fbfaf7; --accent:#b22222; --ok:#2a7d2a; }
+  * { box-sizing: border-box; }
+  body { font: 15px/1.55 -apple-system, "Segoe UI", system-ui, sans-serif; color: var(--ink);
+         background: var(--bg); margin: 0; padding: 0; }
+  header { padding: 18px 28px; border-bottom: 1px solid var(--line); display:flex; align-items:baseline; gap:14px; }
+  header h1 { font-size: 19px; margin: 0; font-weight: 600; }
+  header .sub { color: var(--dim); font-size: 13px; }
+  main { max-width: 980px; margin: 0 auto; padding: 24px 28px 60px; }
+  section { margin-bottom: 34px; }
+  h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim);
+       border-bottom: 1px solid var(--line); padding-bottom: 6px; margin: 0 0 14px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing:.04em; }
+  code, .mono { font-family: "SF Mono", "Cascadia Mono", Consolas, monospace; font-size: 13px; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; background:#efece4; color:var(--dim); }
+  .pill.admin { background:#f3dada; color:var(--accent); }
+  .pill.node  { background:#dde9f3; color:#23577d; }
+  .pill.user  { background:#e2efe2; color:var(--ok); }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--ok); margin-right:6px; }
+  input, select, button { font: inherit; padding: 6px 9px; border: 1px solid var(--line); border-radius: 6px; background:#fff; }
+  button { cursor: pointer; background: var(--ink); color: #fff; border-color: var(--ink); }
+  button.ghost { background:#fff; color: var(--ink); }
+  button.danger { background:#fff; color: var(--accent); border-color:#e6c9c9; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .muted { color: var(--dim); font-size: 13px; }
+  .bar { height:7px; background:#ece8df; border-radius:4px; overflow:hidden; width:120px; display:inline-block; vertical-align:middle; }
+  .bar > i { display:block; height:100%; background:var(--accent); }
+  #login { max-width: 420px; }
+  .secret { background:#fff7e6; border:1px solid #f0d98a; padding:10px 12px; border-radius:6px; margin-top:10px; word-break:break-all; }
+  .hide { display:none; }
+  .err { color: var(--accent); font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>llama-chip&nbsp;hub</h1>
+  <span class="sub">shared GPU pool · control plane</span>
+  <span style="margin-left:auto" class="muted" id="whoami"></span>
+</header>
+<main>
+  <section id="login">
+    <h2>Sign in</h2>
+    <div class="row">
+      <input id="key" type="password" placeholder="API key (admin or token)" style="flex:1; min-width:240px" />
+      <button onclick="signIn()">Enter</button>
+      <button class="ghost" onclick="signOut()">Sign out</button>
+    </div>
+    <div class="err" id="loginErr"></div>
+    <p class="muted">Your key is kept in this browser only and sent as a Bearer token.</p>
+  </section>
+
+  <section id="rosterSec" class="hide">
+    <h2>Pool — online nodes</h2>
+    <table>
+      <thead><tr><th>Node</th><th>Models</th><th>GPUs (free / total)</th><th>Owner</th><th>Seen</th></tr></thead>
+      <tbody id="rosterBody"></tbody>
+    </table>
+    <p class="muted" id="rosterEmpty">No nodes online. Start a node with <code>hub.url</code> + a node token.</p>
+  </section>
+
+  <section id="joinSec" class="hide">
+    <h2>How to join this pool</h2>
+    <p class="muted">Install <code>llama-chip</code>, join the mesh, then add a <code>federation</code> block to
+       <code>config.json</code> with a token minted below. Contributors (GPUs) use a <b>node</b> token;
+       clients with no GPUs use a <b>user</b> token. Replace <code>&lt;mesh-ip&gt;</code> with this machine's mesh address.</p>
+    <pre class="secret" id="joinSnippet" style="white-space:pre-wrap"></pre>
+  </section>
+
+  <section id="tokenSec" class="hide">
+    <h2>Access tokens</h2>
+    <div class="row" style="margin-bottom:14px">
+      <select id="newKind"><option value="node">node</option><option value="user">user</option><option value="admin">admin</option></select>
+      <input id="newLabel" placeholder="label (e.g. my laptop)" style="flex:1; min-width:200px" />
+      <button onclick="mint()">Mint token</button>
+    </div>
+    <div class="secret hide" id="mintOut"></div>
+    <table>
+      <thead><tr><th>Label</th><th>Kind</th><th>Created</th><th></th></tr></thead>
+      <tbody id="tokenBody"></tbody>
+    </table>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+function key(){ return localStorage.getItem('hubKey') || ''; }
+async function api(path, opts={}) {
+  opts.headers = Object.assign({'Authorization':'Bearer '+key()}, opts.headers||{});
+  if (opts.body) opts.headers['Content-Type'] = 'application/json';
+  const r = await fetch(path, opts);
+  const j = await r.json().catch(()=>({}));
+  if (!r.ok) throw new Error((j.error && j.error.message) || ('HTTP '+r.status));
+  return j;
+}
+function fmtAgo(iso){ const s=(Date.now()-new Date(iso))/1000; return s<60?Math.round(s)+'s':Math.round(s/60)+'m'; }
+async function signIn(){
+  localStorage.setItem('hubKey', $('#key').value.trim());
+  $('#loginErr').textContent='';
+  await refresh();
+}
+function signOut(){ localStorage.removeItem('hubKey'); location.reload(); }
+async function refresh(){
+  if (!key()) { $('#rosterSec').classList.add('hide'); $('#tokenSec').classList.add('hide'); return; }
+  let me;
+  try { me = await api('/api/me'); }
+  catch(e){ $('#loginErr').textContent = 'Sign-in failed: '+e.message; $('#whoami').textContent=''; return; }
+  $('#whoami').textContent = me.label ? (me.label+' · '+me.kind) : me.kind;
+  $('#rosterSec').classList.remove('hide');
+  // join snippet — filled with THIS hub's live URL so the repo docs can stay generic
+  $('#joinSec').classList.remove('hide');
+  $('#joinSnippet').textContent =
+`"federation": {
+  "node_name": "my-box",
+  "advertise": "http://<mesh-ip>:8090",
+  "hub_url": "${location.origin}",
+  "hub_token": "lck_…",
+  "poll_interval_sec": 5
+}`;
+  try {
+    const {nodes} = await api('/api/roster');
+    $('#rosterBody').innerHTML = (nodes||[]).map(n => `<tr>
+      <td><span class="dot"></span><b>${n.name}</b><br><span class="mono muted">${n.mesh_addr}</span></td>
+      <td>${(n.models||[]).map(m=>`<code>${m}</code>`).join('<br>')||'<span class="muted">—</span>'}</td>
+      <td>${(n.gpus||[]).map(g=>{const free=g.mem_total-g.mem_used;const pct=g.mem_total?Math.round(100*g.mem_used/g.mem_total):0;
+            return `<div>${g.name||('GPU'+g.index)} <span class="bar"><i style="width:${pct}%"></i></span> ${free}/${g.mem_total} MiB</div>`;}).join('')||'<span class="muted">—</span>'}</td>
+      <td class="muted">${n.owner||''}</td>
+      <td class="muted">${fmtAgo(n.last_seen)} ago</td></tr>`).join('');
+    $('#rosterEmpty').classList.toggle('hide', (nodes||[]).length>0);
+  } catch(e){ $('#rosterBody').innerHTML=`<tr><td colspan=5 class="err">${e.message}</td></tr>`; }
+  // token management — admin only
+  if (me.kind==='admin'){ $('#tokenSec').classList.remove('hide'); await loadTokens(); }
+  else $('#tokenSec').classList.add('hide');
+}
+async function loadTokens(){
+  try {
+    const {tokens} = await api('/api/tokens');
+    $('#tokenBody').innerHTML = (tokens||[]).map(t=>`<tr>
+      <td>${t.label||'<span class="muted">(unlabeled)</span>'}</td>
+      <td><span class="pill ${t.kind}">${t.kind}</span></td>
+      <td class="muted">${new Date(t.created_at).toLocaleString()}</td>
+      <td>${t.revoked_at?'<span class="muted">revoked</span>':`<button class="danger" onclick="revoke('${t.id}')">revoke</button>`}</td></tr>`).join('');
+  } catch(e){ $('#tokenBody').innerHTML=`<tr><td colspan=4 class="err">${e.message}</td></tr>`; }
+}
+async function mint(){
+  try {
+    const out = await api('/api/tokens', {method:'POST', body: JSON.stringify({kind:$('#newKind').value, label:$('#newLabel').value})});
+    const el=$('#mintOut'); el.classList.remove('hide');
+    el.innerHTML = `New <b>${out.kind}</b> token <b>${out.label||''}</b> — copy it now, it won't be shown again:<br><code>${out.token}</code>`;
+    $('#newLabel').value=''; await loadTokens();
+  } catch(e){ const el=$('#mintOut'); el.classList.remove('hide'); el.innerHTML=`<span class="err">${e.message}</span>`; }
+}
+async function revoke(id){ try{ await api('/api/tokens/revoke',{method:'POST',body:JSON.stringify({id})}); await loadTokens(); }catch(e){ alert(e.message); } }
+// boot
+if (key()) refresh();
+setInterval(()=>{ if(key()) refresh(); }, 5000);
+</script>
+</body>
+</html>

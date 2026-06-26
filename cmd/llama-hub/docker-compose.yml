@@ -1,0 +1,20 @@
+# Dokploy "Compose" app for the llama-chip hub at llama.example.com.
+# Build context is the repo root; add the domain (→ container port 8088) in the Dokploy UI,
+# and set LLAMA_HUB_ADMIN_KEY as a secret env. The /data volume persists minted tokens.
+services:
+  llama-hub:
+    build:
+      context: ../..
+      dockerfile: cmd/llama-hub/Dockerfile
+    environment:
+      LLAMA_HUB_LISTEN: ":8088"
+      LLAMA_HUB_TOKENS: "/data/tokens.json"
+      # LLAMA_HUB_ADMIN_KEY is injected from Dokploy secrets (do NOT commit it)
+      LLAMA_HUB_ADMIN_KEY: "${LLAMA_HUB_ADMIN_KEY}"
+    volumes:
+      - hub-data:/data
+    expose:
+      - "8088"
+    restart: unless-stopped
+volumes:
+  hub-data:
