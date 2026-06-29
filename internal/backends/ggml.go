@@ -32,15 +32,15 @@ func ManagedDir() string {
 	return filepath.Join(home, ".llama-chip", "backends")
 }
 
-// ggmlAssetFrags returns the two release-asset name fragments to fetch for this
-// host: the llama-server binary zip and the matching cudart zip. Windows + CUDA
-// 12 today (the 4090 box); other hosts download a release by hand + use an
-// explicit backend dir.
-func ggmlAssetFrags() (binFrag, cudartFrag string, err error) {
+// ggmlCudaTag returns the CUDA-family tag used in this host's release-asset names
+// (the server binary is "…bin-win-<tag>-x64.zip", the cudart is
+// "cudart-…-<tag>-x64.zip"). Windows + CUDA 12 today (the 4090 box); other hosts
+// download a release by hand + use an explicit backend dir.
+func ggmlCudaTag() (string, error) {
 	if runtime.GOOS != "windows" {
-		return "", "", fmt.Errorf("pull-ggml currently supports Windows + CUDA 12 only (host is %s); download a llama.cpp release by hand and point a slot at it with an explicit backend dir", runtime.GOOS)
+		return "", fmt.Errorf("pull-ggml currently supports Windows + CUDA 12 only (host is %s); download a llama.cpp release by hand and point a slot at it with an explicit backend dir", runtime.GOOS)
 	}
-	return "bin-win-cuda-12.4-x64", "cudart-llama-bin-win-cuda-12.4-x64", nil
+	return "cuda-12.4", nil
 }
 
 type ghRelease struct {
@@ -82,7 +82,7 @@ func managedBackend(dir, tag string) Backend {
 // and extracts BOTH into ManagedDir()/ggml-<tag>/. Idempotent: a build already
 // present is reused without re-downloading.
 func PullGGML(ref string) (Backend, error) {
-	binFrag, cudartFrag, err := ggmlAssetFrags()
+	cudaTag, err := ggmlCudaTag()
 	if err != nil {
 		return Backend{}, err
 	}
@@ -101,17 +101,20 @@ func PullGGML(ref string) (Backend, error) {
 	}
 	var binURL, cudartURL string
 	for _, a := range rel.Assets {
-		if !strings.HasSuffix(a.Name, ".zip") {
+		n := a.Name
+		if !strings.HasSuffix(n, ".zip") {
 			continue
 		}
-		if strings.Contains(a.Name, binFrag) {
-			binURL = a.URL
-		} else if strings.Contains(a.Name, cudartFrag) {
+		// cudart's own name also contains "bin-win-<tag>", so match cudart FIRST.
+		switch {
+		case strings.Contains(n, "cudart") && strings.Contains(n, cudaTag):
 			cudartURL = a.URL
+		case strings.Contains(n, "bin-win-"+cudaTag):
+			binURL = a.URL
 		}
 	}
 	if binURL == "" || cudartURL == "" {
-		return Backend{}, fmt.Errorf("release %s has no %s / %s asset (assets change names sometimes — pull a different build or use an explicit dir)", rel.TagName, binFrag, cudartFrag)
+		return Backend{}, fmt.Errorf("release %s has no win-%s server+cudart .zip assets (asset names change sometimes — try another build or an explicit dir)", rel.TagName, cudaTag)
 	}
 	for _, u := range []string{binURL, cudartURL} {
 		fmt.Printf("  downloading %s ...\n", filepath.Base(u))
