@@ -1,7 +1,9 @@
 # Spec — custom `llama-server` backends (cut the LM Studio runtime tether)
 
 **Status:** P0 verified + **E1 (per-slot backend override) + E2 (managed `pull-ggml` + `ggml@<tag>`
-resolution) BUILT** 2026-06-28. **Date:** 2026-06-28.
+resolution) BUILT + verified** 2026-06-28 (E2 download path proven by a real b9747 pull; a cudart-asset-match
+bug was caught + fixed). **E4 `runner` field — design now grounded in Unsloth Studio, not yet built.**
+**Date:** 2026-06-28.
 **Origin:** the model-rig session of 2026-06-28 — three new coding models served fine on the rig
 (Qwen3.5-9B-MTP, Nemotron Cascade 2, EXAONE 4.5), but **North Mini Code (`cohere2moe`) and DiffusionGemma
 (block-diffusion) crashed**: LM Studio's bundled `llama.cpp` (cuda12@2.22.0) doesn't have those
@@ -98,14 +100,69 @@ convenience over E1's manual dir; ship it second.
 `llama-chip backends` already lists LM Studio builds; have it also scan `~/.llama-chip/backends/` and flag
 custom/ggml builds, so `backends` is the one place to see every runnable `llama-server`.
 
-## Out of scope → a separate, bigger spec
+### E4 — the `runner` field (non-`llama-server` engines: block-diffusion / DiffusionGemma)
 
-**DiffusionGemma (block-diffusion) is NOT solved by this.** It needs a *different binary* —
-`llama-diffusion-cli` (llama.cpp PR #24423) — with a different generation protocol (multi-canvas diffusion,
-not token-by-token), so it isn't `llama-server`-shaped and won't answer `/v1/chat/completions` the normal
-way. That's a future **per-slot `runner` field** (`"runner": "llama-diffusion-cli"`) + an OpenAI-API
-translation shim — its own design pass. **For now, run DiffusionGemma in Unsloth Studio** (it bundles the
-diffusion runner and exposes an OpenAI endpoint llama-chip's router could even federate to).
+**DiffusionGemma is NOT solved by E1–E3.** Block-diffusion LLMs are served by a *different binary* than
+`llama-server` (e.g. `llama-diffusion-*`, llama.cpp PR #24423), with a different generation protocol
+(multi-canvas diffusion, not token-by-token). The `runner` field is how a slot dispatches to such an engine
+while the OpenAI router stays unchanged. (Promotable to its own spec once we actually build it.)
+
+**Grounded design — Unsloth Studio already solves this exact problem** (explored 2026-06-28; we mimic the
+*design*, not the code — see the license caveat below). Their block-diffusion path
+(`studio/backend/core/inference/llama_cpp.py`) does five things llama-chip should copy as a *pattern*:
+
+1. **Route by GGUF metadata, before arch resolution.** Read the GGUF header; treat the slot as diffusion if
+   `general.architecture` starts with `"diffusion"` **or** the file carries a `diffusion.canvas_length` key.
+   Deciding *before* normal arch-resolution means an unknown/bleeding-edge arch doesn't fall back to
+   `llama-server` and crash. (Unsloth: `_is_diffusion`.)
+2. **A different binary behind the SAME interface.** The diffusion runner presents the *same* `/v1` +
+   `/health` as `llama-server`, "so the rest of Studio is unchanged." → llama-chip's router and health-check
+   need **zero** changes; only the launch differs.
+3. **Runner discovery = env override OR adjacent to `llama-server`.** Find it via an env var
+   (`DG_VISUAL_BIN`-style) **or** next to `llama-server` in the same backend dir (`build/bin`, `Release`).
+   Absent → actionable error, never a silent downgrade. Fits llama-chip's self-contained backend dir: the
+   runner ships in the same `ggml-bNNNN/` extract once such builds exist.
+4. **Launch shape:** `runner --gguf <path> --host 127.0.0.1 --port <p> --gpu <id> --maxtok <n>`; child dies
+   with the parent (no orphaned GPU process); read the auto-sized context back from stdout.
+5. **Dispatch short-circuit:** after the metadata read, `if isDiffusion { return startRunner(...) }` *before*
+   the `llama-server` branch; resolve the `llama-server` binary lazily so its not-found error is deferred (a
+   diffusion GGUF doesn't need it).
+
+**llama-chip shape:** a `"runner"` field on `config.Slot` (default empty = `llama-server`), or auto-detected
+from GGUF metadata per (1). `Backend` still supplies the *dir*; `runner` selects *which binary in it*. The
+OpenAI router is untouched (2). Build when a diffusion `llama-server`-adjacent binary actually exists in a
+ggml-org (or our own) release — **until then, run DiffusionGemma in Unsloth Studio** and optionally federate
+llama-chip's router to its OpenAI endpoint.
+
+## Patterns to adopt from Unsloth Studio (explored 2026-06-28)
+
+Unsloth Studio's backend is a Python peer to llama-chip — same job (manage llama.cpp installs + GGUFs, serve
+OpenAI-compat). Its lifecycle code (`studio/install_llama_prebuilt.py`,
+`studio/backend/core/inference/llama_cpp.py`) is worth mimicking by *design*:
+
+1. **Runner dispatch (E4 above)** — the highest-value steal; it *is* the runner field.
+2. **Integrity-verified pulls + dual source.** Their fork publishes a schema-versioned `manifest.json` +
+   separate `sha256.json` per release; the host picks its artifact from the manifest's GPU/arch coverage and
+   **refuses any asset absent from the checksum manifest**. Vanilla ggml-org has no manifest → selected by
+   filename regex (what `pull-ggml` does today). Adopt-later: if we ever publish our own backend builds, ship
+   a manifest+sha; for ggml-org pulls, add a sha256 check if/when they publish one.
+3. **Capability probe before arg-building.** Parse `<server> --help`, cache on `(path, mtime)`, feature-gate
+   flags per build — so a flag present on a fresh ggml build but not on LM Studio's older one is detected,
+   not assumed. Directly relevant since llama-chip juggles backends of different vintages.
+4. **Binary-discovery ladder + owned-process reaping.** An ordered env→install-tree→PATH search that
+   distinguishes a *transiently locked* binary (Windows AV / in-flight install) from a *missing* one, and
+   only kills servers under a known install root. Both map straight onto a Go multi-backend manager.
+5. **Model registry — confirmation NOT to over-build.** Unsloth keeps no alias catalog: a model is an HF
+   `repo_id` + a quant "variant" → blob-hash → `huggingface_hub` snapshot into the stock HF cache, plus a
+   small default-seed list and a path→clean-name normalizer for `/v1/models`. Validates llama-chip's lean
+   approach; if we add model-pulling, copy this shape, not a heavy catalog.
+
+**⚠ License caveat (load-bearing).** Unsloth Studio's **entire backend** — every file above (inference /
+serving / diffusion / installer) — is **AGPL-3.0**, *not* "Apache core / AGPL UI" as first assumed. Only the
+`unsloth/` training tree is Apache-2.0, and that's the part least useful here. **Mimic the designs/
+architecture (which are not copyrightable) in our own Go; do not translate or lift those files.** The
+runner-dispatch idea, manifest+sha scheme, discovery ladder, and HF-as-registry approach are all expressible
+independently.
 
 ## Build plan + oracle
 
@@ -117,7 +174,10 @@ diffusion runner and exposes an OpenAI endpoint llama-chip's router could even f
 - **P1 — E1 per-slot backend.** `Slot.Backend` + per-slot resolve. Test: dance-moe on cuda12 + North Mini
   on the ggml dir, both healthy at once. Keep a unit test on the resolver (variant vs path vs `ggml@`).
 - **P2 — E2 managed `pull-ggml`** + `ggml@<build>` resolution + `backends` listing.
-- **P3 (separate spec) — the `runner` field** for `llama-diffusion-cli` / non-`llama-server` engines.
+- **P3 — the `runner` field (E4)** for `llama-diffusion-*` / non-`llama-server` engines — design now grounded
+  in Unsloth Studio's block-diffusion path (route-by-GGUF-metadata → same `/v1` interface → binary adjacent
+  to `llama-server`). Build when a diffusion `llama-server`-adjacent binary ships in a ggml-org (or our own)
+  release; until then DiffusionGemma runs in Unsloth Studio.
 
 ## Risks / compatibility
 
