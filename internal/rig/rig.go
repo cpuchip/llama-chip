@@ -118,6 +118,10 @@ func (r *Rig) Load(s config.Slot) error {
 	if !ok {
 		return fmt.Errorf("no single model matches %q", s.Model)
 	}
+	be, err := r.backendFor(s)
+	if err != nil {
+		return fmt.Errorf("slot %q: %w", s.Name(), err)
+	}
 	r.mu.Lock()
 	key := strings.ToLower(s.Name())
 	if _, exists := r.byName[key]; exists {
@@ -127,7 +131,7 @@ func (r *Rig) Load(s config.Slot) error {
 	if s.Port == 0 {
 		s.Port = r.nextPortLocked()
 	}
-	in := &Instance{Slot: s, Model: m, Backend: r.backend, Port: s.Port, state: Stopped, tail: newRing(60)}
+	in := &Instance{Slot: s, Model: m, Backend: be, Port: s.Port, state: Stopped, tail: newRing(60)}
 	r.instances = append(r.instances, in)
 	r.byName[key] = in
 	r.mu.Unlock()
@@ -279,11 +283,29 @@ func New(cfg *config.Config, logger *log.Logger) (*Rig, error) {
 		if !ok {
 			return nil, fmt.Errorf("slot %q: no single model matches %q (run `llama-chip models`)", s.Name(), s.Model)
 		}
-		in := &Instance{Slot: s, Model: m, Backend: be, Port: s.Port, state: Stopped, tail: newRing(60)}
+		sbe, err := r.backendFor(s)
+		if err != nil {
+			return nil, fmt.Errorf("slot %q: %w", s.Name(), err)
+		}
+		if s.Backend != "" {
+			logger.Printf("slot %q backend override: %s (%s)", s.Name(), sbe.Variant, sbe.Server)
+		}
+		in := &Instance{Slot: s, Model: m, Backend: sbe, Port: s.Port, state: Stopped, tail: newRing(60)}
 		r.instances = append(r.instances, in)
 		r.byName[strings.ToLower(s.Name())] = in
 	}
 	return r, nil
+}
+
+// backendFor resolves a slot's backend: its per-slot override (a variant name or an
+// explicit dir holding a self-managed llama-server) if set, else the rig-global backend.
+// This is what lets the stable models stay on LM Studio's vetted build while one slot
+// runs a fresh ggml-org llama-server for a bleeding-edge arch.
+func (r *Rig) backendFor(s config.Slot) (backends.Backend, error) {
+	if s.Backend == "" {
+		return r.backend, nil
+	}
+	return resolveBackend(s.Backend)
 }
 
 func resolveBackend(spec string) (backends.Backend, error) {

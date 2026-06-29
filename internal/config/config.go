@@ -17,6 +17,7 @@ type Slot struct {
 	Model     string   `json:"model"`                // model handle (ID or unique name substring) from `llama-chip models`
 	Alias     string   `json:"alias,omitempty"`      // the name clients use in the OpenAI `model` field (defaults to Model)
 	GPUs      []int    `json:"gpus"`                 // [0] pins to GPU0; [0,1] splits one model across both cards
+	Backend   string   `json:"backend,omitempty"`    // per-slot backend override: a variant ("cuda12") OR a dir holding a self-managed llama-server (e.g. a fresh ggml-org build); "" = the rig's config.Backend
 	CtxSize   int      `json:"ctx_size,omitempty"`   // TOTAL context across slots (--ctx-size); per-request = ctx_size / parallel
 	Parallel  int      `json:"parallel,omitempty"`   // concurrent request slots (--parallel); default 1. per-slot ctx = ctx_size/parallel
 	KVCache   string   `json:"kv_cache,omitempty"`   // "q8_0" (default, halves KV bytes) | "f16" | "q4_0"
