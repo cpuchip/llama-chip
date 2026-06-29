@@ -1,7 +1,7 @@
 # Spec — custom `llama-server` backends (cut the LM Studio runtime tether)
 
-**Status:** P0 verified + **E1 (per-slot backend override) BUILT** 2026-06-28; E2 (managed `pull-ggml`)
-is next. **Date:** 2026-06-28.
+**Status:** P0 verified + **E1 (per-slot backend override) + E2 (managed `pull-ggml` + `ggml@<tag>`
+resolution) BUILT** 2026-06-28. **Date:** 2026-06-28.
 **Origin:** the model-rig session of 2026-06-28 — three new coding models served fine on the rig
 (Qwen3.5-9B-MTP, Nemotron Cascade 2, EXAONE 4.5), but **North Mini Code (`cohere2moe`) and DiffusionGemma
 (block-diffusion) crashed**: LM Studio's bundled `llama.cpp` (cuda12@2.22.0) doesn't have those

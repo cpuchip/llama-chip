@@ -54,6 +54,8 @@ func main() {
 		err = lms.Run(append([]string{"runtime"}, os.Args[2:]...)...) // passthrough to LM Studio's lms
 	case "pull":
 		err = cmdPull(os.Args[2:])
+	case "pull-ggml":
+		err = cmdPullGGML(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -77,6 +79,7 @@ usage:
   llama-chip serve      start the rig: process manager + OpenAI router (:8090) + loader UI
   llama-chip runtime …  manage inference runtimes via LM Studio's lms (ls|get|select|update|remove)
   llama-chip pull [q]   download the latest runtime via LM Studio (default q: llama.cpp:cuda12)
+  llama-chip pull-ggml [bNNNN|latest]  pull a llama.cpp build straight from ggml-org releases — use via "backend":"ggml@latest"
 `)
 }
 
@@ -103,6 +106,16 @@ func cmdBackends() error {
 		fmt.Printf("\nlatest runnable CUDA12: %s (%s)\n", b.Version, b.Dir)
 	} else {
 		fmt.Println("\nno runnable CUDA12 backend — open LM Studio and let it download one, or pick another variant")
+	}
+	if mb := backends.DiscoverManaged(); len(mb) > 0 {
+		fmt.Println("\nggml-org builds (llama-chip pull-ggml — use via \"backend\": \"ggml@<tag>\"):")
+		for _, b := range mb {
+			state := "stub"
+			if b.Complete {
+				state = "yes"
+			}
+			fmt.Printf("  ggml@%s  runnable=%s  %s\n", b.Version, state, b.Dir)
+		}
 	}
 	return nil
 }
@@ -227,6 +240,22 @@ func cmdPull(args []string) error {
 		return err
 	}
 	fmt.Println("\ndone — run `llama-chip backends` to see it; the latest runnable is picked automatically.")
+	return nil
+}
+
+// cmdPullGGML downloads a llama.cpp build straight from ggml-org releases (ahead of
+// LM Studio's cadence), so a slot can run a bleeding-edge arch via "backend":
+// "ggml@latest". Idempotent — a build already pulled is reused.
+func cmdPullGGML(args []string) error {
+	ref := "latest"
+	if len(args) > 0 && args[0] != "" {
+		ref = args[0]
+	}
+	b, err := backends.PullGGML(ref)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("\nuse it with  \"backend\": \"ggml@%s\"  (or \"ggml@latest\") on a slot or rig-wide.\n", b.Version)
 	return nil
 }
 

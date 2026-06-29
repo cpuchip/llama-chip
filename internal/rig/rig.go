@@ -309,6 +309,10 @@ func (r *Rig) backendFor(s config.Slot) (backends.Backend, error) {
 }
 
 func resolveBackend(spec string) (backends.Backend, error) {
+	// a self-managed ggml-org build llama-chip pulled itself: "ggml@latest" | "ggml@bNNNN"
+	if rest, ok := strings.CutPrefix(spec, "ggml@"); ok {
+		return backends.ResolveGGML(rest)
+	}
 	// explicit directory containing the llama-server binary
 	if strings.ContainsAny(spec, "/\\") {
 		srv := spec + string(os.PathSeparator) + backends.ServerBinName()
