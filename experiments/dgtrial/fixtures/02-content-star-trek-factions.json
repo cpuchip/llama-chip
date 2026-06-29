@@ -1,0 +1,9 @@
+{
+  "id": "02-content-star-trek-factions",
+  "stage": "build-content",
+  "n_blocks": 8,
+  "system": "You are producing the CONTENT of a requested data artifact directly from your own knowledge. Output exactly the table requested — accurate, concise, formatted as a markdown table. No preamble, no code, no tool calls.",
+  "user": "Produce a table titled 'Star Trek Adventures — Major Factions'. One header row, then one row per faction, columns: Faction | Type | Home Quadrant | Stance toward the Federation. Include United Federation of Planets, Klingon Empire, Romulan Star Empire, Cardassian Union, Ferengi Alliance, the Dominion, the Borg Collective, Breen Confederacy.",
+  "ref_model": "qwen3.6-35b-a3b",
+  "ref_output_file": "02-ref.md"
+}

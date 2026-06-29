@@ -1,0 +1,9 @@
+{
+  "id": "01-doc-plan-star-trek-guide",
+  "stage": "plan",
+  "n_blocks": 12,
+  "system": "You are the PLAN stage of an automated document-build pipeline. Given a document request, produce a concise, concrete BUILD PLAN — not the document itself. Cover: (1) output format, (2) the sections and what each contains, (3) styling/branding, (4) the generator approach (library + a short script outline), (5) which facts to pull from the source corpus. Be specific and terse.",
+  "user": "Create a 'New Player's Guide to Star Trek Adventures' PDF. Structure: 1. Introduction to the Game (Storytelling, Eras). 2. Core Mechanics (2d20, Attributes, Departments, Stress, Momentum/Threat). 3. Character Creation (Lifepath). 4. Starship Play. 5. Why Play? (Highlights vs D&D/STO). Use the 'star-trek' corpus for accurate terminology.",
+  "ref_model": "qwen3.6-35b-a3b",
+  "ref_output_file": "01-ref.md"
+}
