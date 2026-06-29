@@ -152,6 +152,16 @@ func cmdServe(args []string) error {
 	}
 	r.Start()
 
+	// Boot into the default profile when no static slots are configured, so a restart comes up
+	// serving the right layout (e.g. dance-moe: reasoner + vision-capable gemma) instead of empty.
+	if len(cfg.Slots) == 0 && cfg.DefaultProfile != "" {
+		if err := r.ApplyProfile(cfg.DefaultProfile); err != nil {
+			logger.Printf("default_profile %q: %v (continuing — apply one via /api/profile)", cfg.DefaultProfile, err)
+		} else {
+			logger.Printf("booted into default_profile %q", cfg.DefaultProfile)
+		}
+	}
+
 	// Federation (optional): pool GPUs across peer nodes behind this one endpoint.
 	fedCtx, fedCancel := context.WithCancel(context.Background())
 	f := fed.New(cfg.FedConfig(), logger)

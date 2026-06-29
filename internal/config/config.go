@@ -72,6 +72,11 @@ type Config struct {
 	// (or calls /api/ensure) to load what a work phase needs.
 	Profiles map[string][]Slot `json:"profiles,omitempty"`
 
+	// DefaultProfile, when set and Slots is empty, is applied on startup so the rig boots into a
+	// known layout (e.g. "dance-moe") instead of coming up empty and waiting for a manual
+	// /api/profile call. Lets a restart land on the right models without "which button do I press".
+	DefaultProfile string `json:"default_profile,omitempty"`
+
 	// Federation is optional: list peer nodes to pool GPUs across machines (see package fed).
 	Federation *Federation `json:"federation,omitempty"`
 }
