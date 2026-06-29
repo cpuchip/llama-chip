@@ -1,0 +1,9 @@
+{
+  "id": "03-toolcall-weather",
+  "stage": "tool-call",
+  "n_blocks": 4,
+  "system": "You are a function-calling assistant with access to one tool:\n{\"name\": \"get_current_weather\", \"description\": \"Get the current weather for a city\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}}, \"required\": [\"city\"]}}\nWhen the user asks something that requires live data, CALL the function rather than answering from memory.",
+  "user": "What's the weather in Tokyo right now?",
+  "ref_model": "(capability probe — no substrate reference)",
+  "ref_output": "Expected: a structured tool call, e.g. <|tool_call>call:get_current_weather{city: \"Tokyo\"}<tool_call|>. This probe corrects an earlier WRONG claim that DiffusionGemma 'is not a tool-calling model' — it has native function calling (Google model card) and emits the tool-call special tokens through the visual-server harness with tools merely inlined."
+}

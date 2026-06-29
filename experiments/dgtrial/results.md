@@ -1,13 +1,14 @@
 # DiffusionGemma × pg-ai-stewards — detached trial
 
-Model: `diffusiongemma-26B-A4B-it-Q4_K_M.gguf` (Q4_K_M, one RTX 4090). Model load: 9s. Runner: Unsloth's `llama-diffusion-gemma-visual-server`, driven over stdio (no Python).
+Model: `diffusiongemma-26B-A4B-it-Q4_K_M.gguf` (Q4_K_M, one RTX 4090). Model load: 8s. Runner: Unsloth's `llama-diffusion-gemma-visual-server`, driven over stdio (no Python).
 
 ## Summary
 
 | Fixture | Stage | tok | DiffusionGemma tok/s | decode s | ref model |
 |---|---|--:|--:|--:|---|
-| 01-doc-plan-star-trek-guide | plan | 1133 | **144** | 7.8 | qwen3.6-35b-a3b |
-| 02-content-star-trek-factions | build-content | 716 | **236** | 3.0 | qwen3.6-35b-a3b |
+| 01-doc-plan-star-trek-guide | plan | 1133 | **145** | 7.8 | qwen3.6-35b-a3b |
+| 02-content-star-trek-factions | build-content | 716 | **235** | 3.0 | qwen3.6-35b-a3b |
+| 03-toolcall-weather | tool-call | 63 | **102** | 0.6 | (capability probe — no substrate reference) |
 
 ---
 
@@ -17,7 +18,7 @@ Model: `diffusiongemma-26B-A4B-it-Q4_K_M.gguf` (Q4_K_M, one RTX 4090). Model loa
 
 > Create a 'New Player's Guide to Star Trek Adventures' PDF. Structure: 1. Introduction to the Game (Storytelling, Eras). 2. Core Mechanics (2d20, Attributes, Departments, Stress, Momentum/Threat). 3. Character Creation (Lifepath). 4. Starship Play. 5. Why Play? (Highlights vs D&D/STO). Use the 'star-trek' corpus for accurate terminology.
 
-**DiffusionGemma** (1133 tok, 144 tok/s, 7.8s):
+**DiffusionGemma** (1133 tok, 145 tok/s, 7.8s):
 
 ```
 <|channel>thought
@@ -145,7 +146,7 @@ Model: `diffusiongemma-26B-A4B-it-Q4_K_M.gguf` (Q4_K_M, one RTX 4090). Model loa
 
 > Produce a table titled 'Star Trek Adventures — Major Factions'. One header row, then one row per faction, columns: Faction | Type | Home Quadrant | Stance toward the Federation. Include United Federation of Planets, Klingon Empire, Romulan Star Empire, Cardassian Union, Ferengi Alliance, the Dominion, the Borg Collective, Breen Confederacy.
 
-**DiffusionGemma** (716 tok, 236 tok/s, 3.0s):
+**DiffusionGemma** (716 tok, 235 tok/s, 3.0s):
 
 ```
 <|channel>thought
@@ -206,5 +207,29 @@ Model: `diffusiongemma-26B-A4B-it-Q4_K_M.gguf` (Q4_K_M, one RTX 4090). Model loa
 | Breen Confederacy | Confederacy / Theocracy | Gamma Quadrant | Former enemy; allied with Dominion; later neutral |
 
 _(Reference note: the substrate's build stage sourced these from the Star Trek Adventures 2e Core Rulebook corpus via `doc_search`. The Ferengi/Breen "Gamma Quadrant" entries are the substrate model's own output, faithfully reproduced — Ferengi/Breen are canonically Alpha-Quadrant, so this reference is itself imperfect, which makes it a fair head-to-head.)_
+```
+</details>
+
+---
+
+## 03-toolcall-weather — `tool-call`
+
+**Task (binding question):**
+
+> What's the weather in Tokyo right now?
+
+**DiffusionGemma** (63 tok, 102 tok/s, 0.6s):
+
+```
+<|channel>thought
+The user is asking for the current weather in Tokyo.
+I should use the `get_current_weather` tool for this request.
+The tool requires a `city` parameter, which will be "Tokyo".<channel|><|tool_call>call:get_current_weather{city: "Tokyo"}<tool_call|>
+```
+
+<details><summary>Reference — (capability probe — no substrate reference) (substrate)</summary>
+
+```
+Expected: a structured tool call, e.g. <|tool_call>call:get_current_weather{city: "Tokyo"}<tool_call|>. This probe corrects an earlier WRONG claim that DiffusionGemma 'is not a tool-calling model' — it has native function calling (Google model card) and emits the tool-call special tokens through the visual-server harness with tools merely inlined.
 ```
 </details>
