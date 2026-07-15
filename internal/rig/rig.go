@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -394,7 +395,7 @@ func (r *Rig) supervise(in *Instance) {
 			}
 			in.restarts++
 			in.set(Crashed, fmt.Sprintf("exited: %v — %s", err, in.tail.last()))
-			r.log.Printf("[%s] CRASHED (%v) — restarting (#%d) in %s", in.Slot.Name(), err, in.restarts, backoff)
+			r.log.Printf("[%s] CRASHED (%v) — %s — restarting (#%d) in %s", in.Slot.Name(), err, in.tail.last(), in.restarts, backoff)
 		}
 		if in.isStopping() {
 			return
@@ -409,6 +410,14 @@ func (r *Rig) supervise(in *Instance) {
 // launch starts the llama-server process and waits for /health (or an early exit).
 func (r *Rig) launch(in *Instance) error {
 	in.set(Starting, "")
+	// Fail fast if something else already holds the slot's port — otherwise we pay a
+	// full model load just to die on bind, and the crash loop looks like a model/GPU
+	// problem. (A stale Flutter dart.exe squatting :9100 cost hours this way.)
+	if ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", in.Port)); err != nil {
+		return fmt.Errorf("port %d already in use by another process — llama-server cannot bind (find the holder before retrying)", in.Port)
+	} else {
+		ln.Close()
+	}
 	cmd := exec.Command(in.Backend.Server, r.args(in)...)
 	libPath := strings.Join(in.Backend.DLLDirs(), string(os.PathListSeparator))
 	// The runtime libs (ggml-cuda, cudart/cublas) are found differently per OS: Windows
