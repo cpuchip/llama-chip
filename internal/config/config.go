@@ -16,7 +16,7 @@ import (
 type Slot struct {
 	Model     string   `json:"model"`                // model handle (ID or unique name substring) from `llama-chip models`
 	Alias     string   `json:"alias,omitempty"`      // the name clients use in the OpenAI `model` field (defaults to Model)
-	GPUs      []int    `json:"gpus"`                 // [0] pins to GPU0; [0,1] splits one model across both cards
+	GPUs      []int    `json:"gpus"`                 // [0] pins to GPU0; [0,1] splits one model across both cards; [] (or omitted) = CPU-only slot (CUDA_VISIBLE_DEVICES="")
 	Backend   string   `json:"backend,omitempty"`    // per-slot backend override: a variant ("cuda12") OR a dir holding a self-managed llama-server (e.g. a fresh ggml-org build); "" = the rig's config.Backend
 	CtxSize   int      `json:"ctx_size,omitempty"`   // TOTAL context across slots (--ctx-size); per-request = ctx_size / parallel
 	Parallel  int      `json:"parallel,omitempty"`   // concurrent request slots (--parallel); default 1. per-slot ctx = ctx_size/parallel
@@ -56,6 +56,13 @@ type Federation struct {
 	Peers           []Peer `json:"peers,omitempty"`
 	HubURL          string `json:"hub_url,omitempty"`   // optional coordinator (llama.example.com) for roster + tokens
 	HubToken        string `json:"hub_token,omitempty"` // this node's join token for the hub
+
+	// PeerTokens is an optional per-peer OUTBOUND bearer map (peer/node name -> token) attached
+	// when THIS node proxies a chat to that peer. It's how a keyless mesh node still authenticates
+	// to a peer that runs its own federation.token — e.g. a public, bearer-gated NOCIX node. Keyed
+	// by peer name (matches a static peer's name, a hub-roster entry's name, or a ?node= pin);
+	// works in both static and hub-managed modes. A peer with no entry keeps legacy behavior.
+	PeerTokens map[string]string `json:"peer_tokens,omitempty"`
 }
 
 // Config is the whole rig.
@@ -100,6 +107,7 @@ func (c *Config) FedConfig() fed.Config {
 		Peers:        peers,
 		HubURL:       strings.TrimRight(f.HubURL, "/"),
 		PollInterval: time.Duration(f.PollIntervalSec) * time.Second,
+		PeerTokens:   f.PeerTokens,
 	}
 }
 
@@ -150,9 +158,8 @@ func (c *Config) validate() error {
 		if s.Model == "" {
 			return fmt.Errorf("a slot has no model")
 		}
-		if len(s.GPUs) == 0 {
-			return fmt.Errorf("slot %q must pin at least one gpu (gpus: [0] or [0,1])", s.Name())
-		}
+		// An empty gpus ([] or omitted) is intentional: a CPU-only slot (CUDA_VISIBLE_DEVICES="").
+		// [0] pins to a card; [0,1] splits across two. No lower bound to enforce.
 		if names[strings.ToLower(s.Name())] {
 			return fmt.Errorf("duplicate slot name %q", s.Name())
 		}

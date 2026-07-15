@@ -464,6 +464,13 @@ func (rt *Router) ensure(w http.ResponseWriter, req *http.Request) {
 	writeJSON(w, 200, map[string]string{"slot": name, "action": action})
 }
 
+// peerBearer picks the OUTBOUND bearer to attach when proxying to a named peer (per-peer token >
+// node token, via fed.OutboundToken). When it returns "", proxyByModel leaves the caller's incoming
+// Authorization header untouched (the legacy keyless-passthrough) — so: per-peer > node > incoming.
+func (rt *Router) peerBearer(name string) string {
+	return rt.fed.OutboundToken(name)
+}
+
 // proxyByModel buffers the request, reads `model`, and reverse-proxies to whatever serves it:
 // a LOCAL slot first, then — if federation is on — a PEER that serves it over the mesh.
 func (rt *Router) proxyByModel(w http.ResponseWriter, req *http.Request) {
@@ -495,7 +502,7 @@ func (rt *Router) proxyByModel(w http.ResponseWriter, req *http.Request) {
 		}
 		target, _ = url.Parse(base)
 		label = fmt.Sprintf("node %q (%s)", pin, base)
-		bearer = rt.fed.Token()
+		bearer = rt.peerBearer(pin)
 		stripQueryParam(req, "node")
 	} else if in, ok := rt.rig.Resolve(probe.Model); ok {
 		target, _ = url.Parse(fmt.Sprintf("http://127.0.0.1:%d", in.Port))
@@ -503,7 +510,7 @@ func (rt *Router) proxyByModel(w http.ResponseWriter, req *http.Request) {
 	} else if route, ok := rt.fed.Resolve(probe.Model); ok {
 		target, _ = url.Parse(route.PeerURL)
 		label = fmt.Sprintf("peer %q (%s)", route.PeerName, route.PeerURL)
-		bearer = rt.fed.Token()
+		bearer = rt.peerBearer(route.PeerName)
 	} else {
 		writeErr(w, 404, fmt.Sprintf("no local slot or reachable peer serves model %q (see /v1/models)", probe.Model))
 		return

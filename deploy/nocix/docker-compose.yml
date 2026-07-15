@@ -1,0 +1,49 @@
+# docker-compose.yml — CPU-only llama-chip node for Dokploy on the NOCIX VPS.
+#
+# Dokploy maps the app's domain to the published port. The heavy bits (CPU llama.cpp backend +
+# model GGUF) live in the named volume and are fetched on first boot by the entrypoint, so the
+# first `up` takes a while (model download) but restarts/redeploys are fast.
+#
+# All knobs are env-tunable (Dokploy → Environment). Resource limits default conservative because
+# the VPS is shared with a dozen apps.
+services:
+  llama-chip:
+    build:
+      context: ../..                     # repo root — the Go sources live above deploy/nocix/
+      dockerfile: deploy/nocix/Dockerfile
+    image: llama-chip-nocix:latest
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-8090}:8090"        # Dokploy Domain → container port 8090
+    volumes:
+      - llama-chip-data:/data            # backend + model + rendered config persist here
+    environment:
+      # --- identity / federation ---
+      NODE_NAME: "${NODE_NAME:-nocix}"
+      ADVERTISE: "${ADVERTISE:-}"        # PUBLIC url fermion/the hub use to reach this node
+      HUB_URL: "${HUB_URL:-}"            # fermion's hub; empty = standalone gated node
+      HUB_TOKEN: "${HUB_TOKEN:-}"
+      FED_TOKEN: "${FED_TOKEN:-}"        # REQUIRED on a public deploy — gates the API surface
+      POLL_INTERVAL_SEC: "${POLL_INTERVAL_SEC:-5}"
+      # --- model ---
+      MODEL_REPO: "${MODEL_REPO:-lmstudio-community/gemma-4-E2B-it-GGUF}"
+      MODEL_FILE: "${MODEL_FILE:-gemma-4-E2B-it-Q4_K_M.gguf}"
+      MODEL_ALIAS: "${MODEL_ALIAS:-gemma-4-e2b}"
+      MODEL_URL: "${MODEL_URL:-}"        # override to point at any GGUF; default derived from REPO/FILE
+      # --- slot shape (CPU) ---
+      CTX_SIZE: "${CTX_SIZE:-8192}"
+      PARALLEL: "${PARALLEL:-1}"
+      KV_CACHE: "${KV_CACHE:-f16}"
+      BACKEND_REF: "${BACKEND_REF:-latest}"
+    # Resource caps (shared VPS). docker compose honors these v2 keys in non-swarm mode (Dokploy).
+    mem_limit: "${MEM_LIMIT:-6g}"
+    cpus: "${CPUS:-4}"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 900s                 # first boot may download a multi-GB model before /health is up
+
+volumes:
+  llama-chip-data:

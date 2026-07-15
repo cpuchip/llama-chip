@@ -1,0 +1,13 @@
+# Keep the Docker build context lean (the deploy/nocix image only needs go.mod + cmd/ + internal/).
+# The Dockerfile COPYs sources selectively, so this mainly trims what's SENT to the daemon and
+# guarantees build-irrelevant / local-only files never enter a build.
+.git/
+*.exe
+/dist/
+config.json            # the LIVE gitignored rig config — must never enter an image
+*.log
+.playwright-cli/
+experiments/
+docs/
+web/
+README.md

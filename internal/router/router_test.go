@@ -157,6 +157,95 @@ func TestProxyForwardsTokenToPeer(t *testing.T) {
 	}
 }
 
+// TestProxyPeerSpecificTokenWinsOverNodeToken: a per-peer token (federation.peer_tokens[name])
+// is attached to that peer's proxied request, OVERRIDING the node's own federation.token. This is
+// how a keyless mesh node authenticates to a peer that runs its own distinct token (a public,
+// bearer-gated NOCIX node). The node token is deliberately "wrong" for the peer — only the
+// peer-specific token should get the request through.
+func TestProxyPeerSpecificTokenWinsOverNodeToken(t *testing.T) {
+	peer := newFakeBackend("m1")
+	peer.name = "nocix"
+	peer.wantTok = "peercred"
+	defer peer.close()
+
+	// hub-managed mode (fermion's real posture): the roster supplies the peer's model + mesh addr,
+	// so the peer is reachable without polling it. node token would 401 at the peer if it leaked.
+	f := fed.New(fed.Config{
+		NodeName:   "fermion",
+		HubURL:     "http://hub",
+		Token:      "node-cluster-token",
+		PeerTokens: map[string]string{"nocix": "peercred"},
+	}, log.New(io.Discard, "", 0))
+	f.ApplyRoster([]fed.RosterEntry{{Name: "nocix", MeshAddr: peer.srv.URL, Models: []string{"m1"}}}, "fermion")
+
+	front := httptest.NewServer(newRouter(t, f).Handler())
+	defer front.Close()
+
+	resp := chatReq(t, front.URL, "m1")
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d, body %s", resp.StatusCode, b)
+	}
+	if peer.gotAuth != "Bearer peercred" {
+		t.Fatalf("peer saw Authorization %q, want Bearer peercred (per-peer token must win over node token)", peer.gotAuth)
+	}
+}
+
+// TestProxyNodePinAttachesPeerToken: the ?node=<name> pin path also honors the per-peer token.
+func TestProxyNodePinAttachesPeerToken(t *testing.T) {
+	peer := newFakeBackend("shared")
+	peer.name = "beta"
+	peer.wantTok = "betacred"
+	defer peer.close()
+
+	f := fed.New(fed.Config{NodeName: "head", HubURL: "http://hub", PeerTokens: map[string]string{"beta": "betacred"}}, log.New(io.Discard, "", 0))
+	f.ApplyRoster([]fed.RosterEntry{{Name: "beta", MeshAddr: peer.srv.URL, Models: []string{"shared"}}}, "head")
+
+	front := httptest.NewServer(newRouter(t, f).Handler())
+	defer front.Close()
+
+	resp, err := http.Post(front.URL+"/v1/chat/completions?node=beta", "application/json",
+		strings.NewReader(`{"model":"shared","messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d, body %s", resp.StatusCode, b)
+	}
+	if peer.gotAuth != "Bearer betacred" {
+		t.Fatalf("pinned peer saw Authorization %q, want Bearer betacred", peer.gotAuth)
+	}
+}
+
+// TestProxyForwardsIncomingBearerWhenNoTokens: with neither a node token nor a per-peer token,
+// the caller's own incoming Authorization header is forwarded unchanged (the legacy keyless
+// passthrough) — documenting the precedence tail: per-peer token > node token > incoming bearer.
+func TestProxyForwardsIncomingBearerWhenNoTokens(t *testing.T) {
+	peer := newFakeBackend("m1") // wantTok "" — accepts anything, records what it saw
+	defer peer.close()
+
+	f := fed.New(fed.Config{Peers: []fed.PeerConfig{{Name: "home", URL: peer.srv.URL}}}, log.New(io.Discard, "", 0))
+	f.Refresh(context.Background())
+
+	front := httptest.NewServer(newRouter(t, f).Handler())
+	defer front.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/v1/chat/completions", strings.NewReader(`{"model":"m1","messages":[]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer incoming-xyz")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if peer.gotAuth != "Bearer incoming-xyz" {
+		t.Fatalf("peer saw Authorization %q, want the caller's incoming bearer forwarded unchanged", peer.gotAuth)
+	}
+}
+
 func TestProxy404WhenNobodyServes(t *testing.T) {
 	f := fed.New(fed.Config{Peers: []fed.PeerConfig{{URL: "http://127.0.0.1:1"}}}, log.New(io.Discard, "", 0))
 	f.Refresh(context.Background()) // peer unreachable → no routes

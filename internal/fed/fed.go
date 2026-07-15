@@ -35,12 +35,13 @@ type PeerConfig struct {
 
 // Config configures this node's participation in a federation.
 type Config struct {
-	NodeName     string        // this node's name (shown in status + gossiped to peers)
-	Advertise    string        // the URL peers use to reach THIS node (its mesh address)
-	Token        string        // optional bearer token; when set, peer requests must carry it
-	Peers        []PeerConfig  // STATIC peers to gossip with (LAN / hand-listed)
-	HubURL       string        // optional: a hub (llama.example.com) supplies the roster instead of static peers
-	PollInterval time.Duration // how often to refresh; default 5s
+	NodeName     string            // this node's name (shown in status + gossiped to peers)
+	Advertise    string            // the URL peers use to reach THIS node (its mesh address)
+	Token        string            // optional bearer token; when set, INBOUND peer/client requests must carry it AND it's the default OUTBOUND bearer to peers
+	Peers        []PeerConfig      // STATIC peers to gossip with (LAN / hand-listed)
+	HubURL       string            // optional: a hub (llama.example.com) supplies the roster instead of static peers
+	PollInterval time.Duration     // how often to refresh; default 5s
+	PeerTokens   map[string]string // optional per-peer OUTBOUND bearer (peer name -> token); overrides Token when proxying to that peer
 }
 
 // Route is a resolved remote placement for a model.
@@ -80,10 +81,13 @@ type localView struct {
 	Models    []string `json:"models"`
 }
 
-// New builds a Federation from config. Returns nil if neither static peers nor a hub are
-// configured (federation off — the rig behaves exactly as a standalone node).
+// New builds a Federation from config. Returns nil only when the node neither federates NOR gates:
+// no static peers, no hub, AND no token. A token WITHOUT peers/hub yields a non-nil, not-Enabled
+// federation — it does not route, but it still gates the inbound surface (withAuth reads Token()).
+// This is what lets a public leaf node — e.g. NOCIX exposed on HTTPS — be bearer-protected even
+// when it has no peers of its own to reach.
 func New(cfg Config, logger *log.Logger) *Federation {
-	if len(cfg.Peers) == 0 && cfg.HubURL == "" {
+	if len(cfg.Peers) == 0 && cfg.HubURL == "" && cfg.Token == "" {
 		return nil
 	}
 	if cfg.PollInterval <= 0 {
@@ -125,10 +129,42 @@ func (f *Federation) Advertise() string {
 	return f.cfg.Advertise
 }
 
-// Token returns the bearer token used to reach peers (may be empty).
+// Token returns the node's default bearer — gating INBOUND requests and the default OUTBOUND
+// bearer to peers (may be empty).
 func (f *Federation) Token() string {
 	if f == nil {
 		return ""
+	}
+	return f.cfg.Token
+}
+
+// PeerToken returns the per-peer OUTBOUND bearer configured for a named peer, or "" if none.
+// Case-insensitive on the peer name so it matches however the peer is addressed (static peer name,
+// hub-roster entry name, or a ?node= pin). "" means "no per-peer override — use the default Token".
+func (f *Federation) PeerToken(name string) string {
+	if f == nil || len(f.cfg.PeerTokens) == 0 {
+		return ""
+	}
+	if t, ok := f.cfg.PeerTokens[name]; ok { // exact first (common case)
+		return t
+	}
+	for k, t := range f.cfg.PeerTokens {
+		if strings.EqualFold(k, name) {
+			return t
+		}
+	}
+	return ""
+}
+
+// OutboundToken is the single precedence rule for the bearer THIS node sends to a named peer —
+// used both to gossip-poll that peer (/api/fed/local) and to proxy chats to it: the per-peer token
+// wins, else the node's default Token, else "" (forward the caller's incoming bearer / none).
+func (f *Federation) OutboundToken(peerName string) string {
+	if f == nil {
+		return ""
+	}
+	if t := f.PeerToken(peerName); t != "" {
+		return t
 	}
 	return f.cfg.Token
 }
@@ -326,9 +362,12 @@ func (f *Federation) pollPeer(ctx context.Context, p PeerConfig) PeerHealth {
 	}
 	h := PeerHealth{Name: name, URL: p.URL}
 
-	models, err := f.fetchLocal(ctx, p.URL)
+	// A bearer-gated static peer needs ITS token to be polled — honor the same per-peer override
+	// used when proxying (else the node's default token). Roster-discovered peers skip this path.
+	tok := f.OutboundToken(name)
+	models, err := f.fetchLocal(ctx, p.URL, tok)
 	if err != nil {
-		if models, err = f.fetchV1Models(ctx, p.URL); err != nil {
+		if models, err = f.fetchV1Models(ctx, p.URL, tok); err != nil {
 			h.LastErr = err.Error()
 			return h
 		}
@@ -339,21 +378,21 @@ func (f *Federation) pollPeer(ctx context.Context, p PeerConfig) PeerHealth {
 	return h
 }
 
-func (f *Federation) fetchLocal(ctx context.Context, base string) ([]string, error) {
+func (f *Federation) fetchLocal(ctx context.Context, base, token string) ([]string, error) {
 	var lv localView
-	if err := f.getJSON(ctx, base+"/api/fed/local", &lv); err != nil {
+	if err := f.getJSON(ctx, base+"/api/fed/local", token, &lv); err != nil {
 		return nil, err
 	}
 	return lv.Models, nil
 }
 
-func (f *Federation) fetchV1Models(ctx context.Context, base string) ([]string, error) {
+func (f *Federation) fetchV1Models(ctx context.Context, base, token string) ([]string, error) {
 	var resp struct {
 		Data []struct {
 			ID string `json:"id"`
 		} `json:"data"`
 	}
-	if err := f.getJSON(ctx, base+"/v1/models", &resp); err != nil {
+	if err := f.getJSON(ctx, base+"/v1/models", token, &resp); err != nil {
 		return nil, err
 	}
 	out := make([]string, 0, len(resp.Data))
@@ -363,13 +402,13 @@ func (f *Federation) fetchV1Models(ctx context.Context, base string) ([]string, 
 	return out, nil
 }
 
-func (f *Federation) getJSON(ctx context.Context, url string, v any) error {
+func (f *Federation) getJSON(ctx context.Context, url, token string, v any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
-	if f.cfg.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+f.cfg.Token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := f.client.Do(req)
 	if err != nil {

@@ -188,6 +188,27 @@ func TestTokenIsSentToPeers(t *testing.T) {
 	}
 }
 
+// A bearer-gated STATIC peer must be pollable with its per-peer token (the same override used to
+// proxy to it) — otherwise a node with its own federation.token could never be discovered over
+// static peering. Mirrors TestTokenIsSentToPeers but with a per-peer token distinct from the
+// node's own (here the node has no token at all).
+func TestPeerTokenIsSentWhenPollingStaticPeer(t *testing.T) {
+	peer := newFakePeer("m1")
+	peer.wantTok = "peercred" // gate the peer with ITS token
+	defer peer.close()
+	f := testFed(t, Config{
+		Peers:      []PeerConfig{{Name: "nocix", URL: peer.srv.URL}},
+		PeerTokens: map[string]string{"nocix": "peercred"},
+	})
+	f.pollAll(context.Background())
+	if _, ok := f.Resolve("m1"); !ok {
+		t.Fatal("expected the peer-gated static peer to be discovered using its per-peer token")
+	}
+	if got := peer.lastAuth(); got != "Bearer peercred" {
+		t.Fatalf("peer saw Authorization %q, want Bearer peercred (per-peer token on the poll)", got)
+	}
+}
+
 func TestV1ModelsFallback(t *testing.T) {
 	peer := newFakePeer("legacy-model")
 	peer.v1Only = true // /api/fed/local 404s; poller must fall back to /v1/models
@@ -201,15 +222,56 @@ func TestV1ModelsFallback(t *testing.T) {
 
 func TestNewReturnsNilWithoutPeers(t *testing.T) {
 	if f := New(Config{NodeName: "x"}, log.New(io.Discard, "", 0)); f != nil {
-		t.Fatal("federation with no peers should be nil (off)")
+		t.Fatal("federation with no peers, hub, or token should be nil (off)")
 	}
 	// nil-safe helpers
 	var f *Federation
-	if f.Enabled() || f.Token() != "" || f.NodeName() != "" {
+	if f.Enabled() || f.Token() != "" || f.NodeName() != "" || f.PeerToken("x") != "" {
 		t.Fatal("nil federation should report disabled/empty")
 	}
 	if _, ok := f.Resolve("anything"); ok {
 		t.Fatal("nil federation should resolve nothing")
+	}
+}
+
+// A token WITHOUT peers/hub yields a non-nil, NOT-Enabled federation: it does not route, but it
+// still exposes Token() so the router gates its inbound surface — a public leaf node (NOCIX) that
+// must be bearer-protected even though it has no peers of its own.
+func TestTokenOnlyFederationGatesButDoesNotRoute(t *testing.T) {
+	f := New(Config{NodeName: "nocix", Token: "secret"}, log.New(io.Discard, "", 0))
+	if f == nil {
+		t.Fatal("a token-only config must yield a non-nil federation so the inbound gate works")
+	}
+	if f.Enabled() {
+		t.Fatal("a token-only federation should NOT be Enabled (no peers/hub → no routing)")
+	}
+	if f.Token() != "secret" {
+		t.Fatalf("Token()=%q want secret", f.Token())
+	}
+	if _, ok := f.Resolve("anything"); ok {
+		t.Fatal("a token-only federation should resolve nothing")
+	}
+}
+
+func TestPeerTokenLookup(t *testing.T) {
+	f := New(Config{
+		Peers:      []PeerConfig{{Name: "home", URL: "http://x"}},
+		Token:      "node-tok",
+		PeerTokens: map[string]string{"NOCIX": "nocix-tok"},
+	}, log.New(io.Discard, "", 0))
+	if got := f.PeerToken("NOCIX"); got != "nocix-tok" { // exact
+		t.Fatalf("PeerToken(NOCIX)=%q want nocix-tok", got)
+	}
+	if got := f.PeerToken("nocix"); got != "nocix-tok" { // case-insensitive
+		t.Fatalf("PeerToken(nocix)=%q want nocix-tok (case-insensitive)", got)
+	}
+	if got := f.PeerToken("home"); got != "" { // no per-peer entry → "" (caller falls back to Token)
+		t.Fatalf("PeerToken(home)=%q want empty (no per-peer override)", got)
+	}
+	// nil-safe / empty map
+	var nilF *Federation
+	if nilF.PeerToken("x") != "" {
+		t.Fatal("nil federation PeerToken should be empty")
 	}
 }
 

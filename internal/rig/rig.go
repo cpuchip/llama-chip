@@ -105,9 +105,11 @@ type Rig struct {
 }
 
 // Load adds a slot at runtime and starts supervising it (the dynamic-management primitive).
+// An empty GPUs ([] or omitted) is a CPU-only slot: CUDA_VISIBLE_DEVICES="" hides every card and
+// the backend runs on CPU (the mode the GPU-less NOCIX node uses to keep the federation alive).
 func (r *Rig) Load(s config.Slot) error {
-	if s.Model == "" || len(s.GPUs) == 0 {
-		return fmt.Errorf("load needs a model and at least one gpu")
+	if s.Model == "" {
+		return fmt.Errorf("load needs a model")
 	}
 	if s.KVCache == "" {
 		s.KVCache = "q8_0"
@@ -477,12 +479,19 @@ func (r *Rig) launch(in *Instance) error {
 // args builds the llama-server command line for a slot.
 func (r *Rig) args(in *Instance) []string {
 	s := in.Slot
+	// CPU-only slot (no GPUs pinned): offload zero layers to the GPU. Belt-and-braces with
+	// CUDA_VISIBLE_DEVICES="" (which already hides every card) — and correct on a CPU-only
+	// backend build that has no GPU offload at all.
+	ngl := "999"
+	if len(s.GPUs) == 0 {
+		ngl = "0"
+	}
 	a := []string{
 		"--model", in.Model.Path,
 		"--host", "127.0.0.1",
 		"--port", strconv.Itoa(in.Port),
 		"--alias", s.Name(),
-		"--n-gpu-layers", "999",
+		"--n-gpu-layers", ngl,
 	}
 	// Multimodal: load the vision/audio projector so the model can accept images.
 	// An explicit slot.MMProj wins; otherwise auto-detect the co-located mmproj-*.gguf
