@@ -142,3 +142,34 @@ card via `/api/load`, then POST the same prompts to each `/v1/chat/completions` 
 timings. Pause the substrate first (UI → **Free GPUs**, or set `autonomy_paused`), run, then restore
 the `dance` profile and resume. Reasoning models need `max_tokens ≥ ~3000` or they return empty
 `content` (thinking-only).
+
+## ThinkingCap-Qwen3.6-27B vs base Qwen3.6-27B (2026-07-18 A/B)
+
+BottleCap AI's ThinkingCap fine-tune (RL-trained to think ~50% less, Apache-2.0, non-MTP
+Q4_K_M from `bottlecapai/ThinkingCap-Qwen3.6-27B-GGUF`) head-to-head against
+`lmstudio-community` base, identical slots one per 4090 (par2, 160k total ctx, q8_0 KV,
+`no_mmproj`), each at its card's sampler (TC temp 1.0, base 0.6). Streamed; TTFC = time to
+first *content* token (when speech could start). Script: session scratchpad `ab_test.py`;
+alias `thinkingcap-qwen3.6-27b`, profile `thinkingcap`.
+
+| prompt | TC ttfc/total | base ttfc/total | TC think | base think | note |
+|---|---|---|---|---|---|
+| trivial-fact | 6.0 / 6.7s | 8.0 / 8.6s | 1089ch | 1617ch | both fine |
+| voice-smalltalk | 6.9 / 7.8s | 10.4 / 11.4s | 1175ch | 1922ch | both fine |
+| startrek-rp | 8.5 / 9.6s | 9.1 / 10.7s | 1581ch | 1738ch | base slightly richer flavor |
+| cyoa-gm | 22.7 / 28.4s | 16.2 / 23.2s | 4471ch | 3279ch | **reversal** — TC thought MORE |
+| math-word | 11.4 / 11.6s | 27.7 / 36.1s | 1374ch | 3507ch | both correct (20); TC answered in one line |
+| one-word ("exactly one word") | 3.7s → "Paris" | **spiraled: 6755ch think, 2000-tok cap, EMPTY content** | 537ch | 6755ch | the LM Studio failure mode, reproduced |
+| spiral-probe (max_tokens=500) | content emitted (truncated but speakable) | **EMPTY content** | 1798ch | 2003ch | TC survives tight budgets base dies on |
+
+**Verdict: the spiral-resistance is real.** On short/constrained turns ThinkingCap thinks
+~35–60% less, starts speaking 1.3–3s sooner, and — the headline — produced content in both
+spiral scenarios where base produced none. Creative long-form (CYOA GM) showed the same
+no-savings reversal Luke's Dev Lab saw on coding (yt vERb6uIscKo digest): savings live in
+constrained/reasoning turns, not open-ended generation. n=1 per cell; sampler differs by
+card recommendation (temp 1.0 vs 0.6), so think-length deltas fold both effects together.
+Still keep `max_tokens ≥ 2000` for safety — TC thinks less, but always thinks.
+
+⚠ Repo-wide gotcha from this session: adding the ThinkingCap GGUF made the bare handle
+`Qwen3.6-27B-Q4_K_M` AMBIGUOUS (substring of the TC filename too → `models.Find` returns
+not-found). The `dance` profile now uses the full exact ID. Prefer full IDs in profiles.
