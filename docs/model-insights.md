@@ -173,3 +173,26 @@ Still keep `max_tokens ≥ 2000` for safety — TC thinks less, but always think
 ⚠ Repo-wide gotcha from this session: adding the ThinkingCap GGUF made the bare handle
 `Qwen3.6-27B-Q4_K_M` AMBIGUOUS (substring of the TC filename too → `models.Find` returns
 not-found). The `dance` profile now uses the full exact ID. Prefer full IDs in profiles.
+
+## Substrate spiral replay: the 35B-A3B seat is the spiral risk, not the prompts (2026-07-18)
+
+Replayed the substrate's six worst qwen3.6-35b-a3b spirals (cost_events 78K-116K output
+tokens each, 06-22..06-30; two reaped "stale in_progress >15min", one took the bgworker
+down) VERBATIM — exact work_queue bodies incl. tools (one build stage = 126 tools), original
+temperature, only model swapped + max_tokens=16384 ceiling — against ThinkingCap-27B and
+base 27B side by side (one per 4090).
+
+**0 spirals in 12 runs.** Every case finished productively (tool_calls or content), most in
+2-35s at 43-1,500 output tokens. Even the heavy 84-msg build stage: TC 528 tok/32s vs base
+7,603 tok/205s (TC 6× faster, 14× fewer tokens, both correct-shaped tool calls).
+
+Reads on this, honestly: (1) the spiral tendency is seat-specific — 35B-A3B (3B active
+params) tail-spirals on prompts the dense-27B family handles trivially; (2) spirals are tail
+events (~6 mega-events in 3,921 calls) so n=1-per-case replays can't prove the 27Bs *never*
+spiral — but these exact prompts don't force it; (3) the originals ran UNCAPPED — the
+substrate sends no max_tokens on chat dispatches, so any tail spiral runs until the 15-min
+reaper. Structural guard belongs in the dispatch cap / W2 abort-conditions arc regardless of
+seat choice. Replay validates no-spiral + productive shape, not answer quality (no judge pass).
+
+Replay kit: session scratchpad `spiral_replay.py` + `spiral_cases/*.json` (six production
+bodies, extracted 2026-07-18).
