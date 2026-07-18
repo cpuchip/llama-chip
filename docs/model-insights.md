@@ -196,3 +196,33 @@ seat choice. Replay validates no-spiral + productive shape, not answer quality (
 
 Replay kit: session scratchpad `spiral_replay.py` + `spiral_cases/*.json` (six production
 bodies, extracted 2026-07-18).
+
+## Role bake-off re-run: ThinkingCap-27B vs base 27B (2026-07-18)
+
+Reconstructed the three 06-21 role tasks (originals lived in /tmp, gone; task shapes from
+this doc, source verses re-verified against gospel-library) and ran both 27Bs uncapped,
+each at its card's sampler (TC 1.0 / base 0.6 — deltas fold both effects).
+
+| task | TC | base | qualitative verdict |
+|---|---|---|---|
+| gather | 1,484 tok / 37s | 2,342 tok / 66s | **TC** — genuinely tight brief, all 4 sources; base ~2× longer (the "qwens are expansive" June note, still true of base) |
+| reason | 1,591 tok / 45s | 2,227 tok / 67s | **base slightly deeper** (lexical registers, historical/ecumenical detail); TC same core resolution (cause-vs-evidence), crisper — echoes June's dense-vs-MoE split |
+| critic | 2,604 tok / 62s | 3,669 tok / 84s | **tie** — both caught every planted error (1611/KJV date, coinage, katallage misreading) AND named the fallacies precisely (etymological, non sequitur, false dilemma) |
+
+**★ The June confabulation caution reproduces on BOTH, unchanged:** each invented
+historical garnish while correcting the passage (TC: "appears in Wycliffe c. 1382"; base:
+"attonemen/attony" etymology, "κατάλλαξις"). Local models remain strong reasoning over
+given material, weak on recalled specifics — the quote/fact gate stays mandatory
+regardless of seat.
+
+**Qualitative read of the spiral-replay outputs (full capture, spiral_replay_full.json):**
+comparable quality throughout; on the one directly-diffable case (both called
+submit_trajectory_verdict) both verdicts were substantive with real-but-different catches —
+TC flagged fabricated source claims (grounded=false), base caught a hallucinated result
+handle + truncated answer. TC's proposed quote-rule (16793) well-formed and grounded.
+
+**Net:** ThinkingCap ≈ same quality at ~60-70% of the tokens and ~30-45% less wall time on
+role-shaped work; base keeps a slight depth edge on open-ended synthesis. `dance` profile
+now carries TC (alias `thinkingcap-qwen3.6-27b`, par2) — note the substrate's p1 fallback
+alias `qwen3.6-27b` no longer resolves under dance; add a model_aliases row if TC should
+take the substrate fallback seat.
