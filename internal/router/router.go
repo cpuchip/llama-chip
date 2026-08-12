@@ -488,10 +488,30 @@ func (rt *Router) proxyByModel(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 400, "read body: "+err.Error())
 		return
 	}
+	// AMBIGUOUS ROUTING INPUT IS REFUSED HERE, before a target is chosen.
+	//
+	// This used to be a plain json.Unmarshal, which silently keeps the LAST
+	// duplicate key. So a body carrying two `model` values was routed by one of
+	// them while the upstream — free to honour the first, the last, or to
+	// reject outright — might act on the other. Skipping the fold for such a
+	// body (an earlier fix) removed OUR disagreement with the fold and left the
+	// one that actually matters: ours with the upstream, about where the
+	// request was even meant to go.
+	//
+	// parseOrdered refuses duplicate top-level keys, trailing data, and
+	// non-objects, so one policy covers every proxied endpoint: if the request
+	// does not have exactly one reading, nobody guesses on the caller's behalf.
+	doc, perr := parseOrdered(body)
+	if perr != nil {
+		writeErr(w, 400, "ambiguous or unreadable request body: "+perr.Error())
+		return
+	}
 	var probe struct {
 		Model string `json:"model"`
 	}
-	_ = json.Unmarshal(body, &probe)
+	if raw, ok := doc.get("model"); ok {
+		_ = json.Unmarshal(raw, &probe.Model)
+	}
 	if probe.Model == "" {
 		writeErr(w, 400, "missing `model`")
 		return

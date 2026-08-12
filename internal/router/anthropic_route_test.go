@@ -179,19 +179,16 @@ func TestDoor_UnknownModelIsRefused(t *testing.T) {
 	}
 }
 
-// TRAILING DATA never reaches the fold through the handler, and this test
-// records WHY rather than asserting what I first assumed.
+// TRAILING DATA is refused at ROUTING, and this test records what I got wrong
+// rather than smoothing it over.
 //
-// I expected a 200 with the bytes forwarded untouched. It is a 400, because
-// proxyByModel probes the model with json.Unmarshal — which rejects trailing
-// data outright — so the request is refused at routing, before the fold is
-// consulted at all. That is PRE-EXISTING behaviour shared by every proxied
-// endpoint, not something the Anthropic door introduced, and it is defensible:
-// a body whose `model` cannot be read cannot be routed anywhere.
+// I first expected a 200 with the bytes forwarded untouched. It is a 400: the
+// body cannot be read unambiguously, so no target is chosen and nothing is
+// proxied. A body whose `model` cannot be read cannot be routed anywhere.
 //
-// So the fold's "unfoldable forwards unchanged" promise is exercised by bodies
-// that ARE routable but not foldable — duplicate keys, below — and the
-// trailing-data refusal is pinned at the parser in the unit test.
+// The refusal now NAMES the ambiguity instead of reporting a missing field —
+// "trailing data after the JSON object" rather than "missing model", which was
+// true but pointed the caller at the wrong thing.
 func TestDoor_TrailingData_RefusedAtRouting(t *testing.T) {
 	h, seen, done := doorHarness(t, "test-model")
 	defer done()
@@ -199,31 +196,62 @@ func TestDoor_TrailingData_RefusedAtRouting(t *testing.T) {
 	body := []byte(`{"model":"test-model","messages":[{"role":"user","content":"u"},{"role":"system","content":"s"}]}TRAIL`)
 	rec := post(t, h, "/v1/messages", body)
 	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status %d, want 400 (the model probe cannot read a trailing-data body)", rec.Code)
+		t.Fatalf("status %d, want 400 for a body that cannot be read unambiguously", rec.Code)
 	}
 	if seen.path != "" {
-		t.Fatalf("an unroutable body still reached the upstream at %q", seen.path)
+		t.Fatalf("an unreadable body still reached the upstream at %q", seen.path)
 	}
-	if !strings.Contains(rec.Body.String(), "model") {
-		t.Fatalf("the refusal should name the unreadable field, got %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "trailing data") {
+		t.Fatalf("the refusal should name the actual problem, got %s", rec.Body.String())
 	}
 }
 
-// DUPLICATE TOP-LEVEL KEYS: proxyByModel routes on the LAST `model` (json
-// semantics) while the ordered parser reads the FIRST. Rather than let two
-// parsers disagree, the fold refuses and the body is forwarded untouched.
-func TestDoor_DuplicateKeys_ForwardedUnchanged(t *testing.T) {
+func TestDoor_DuplicateModel_RefusedAtRouting(t *testing.T) {
 	h, seen, done := doorHarness(t, "test-model")
 	defer done()
 
-	// routed by the LAST model (test-model); a first-key reader would have
-	// picked "decoy" and sent it somewhere else entirely.
-	body := []byte(`{"model":"decoy","messages":[{"role":"user","content":"a"},{"role":"system","content":"s"}],"messages":[{"role":"user","content":"b"}],"model":"test-model"}`)
-	if rec := post(t, h, "/v1/messages", body); rec.Code != http.StatusOK {
-		t.Fatalf("status %d", rec.Code)
+	body := []byte(`{"model":"decoy","messages":[{"role":"user","content":"a"}],"model":"test-model"}`)
+	rec := post(t, h, "/v1/messages", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400 for two `model` keys", rec.Code)
 	}
-	if !bytes.Equal(seen.body, body) {
-		t.Fatalf("a duplicate-key body was rewritten instead of forwarded:\n sent: %s\n got:  %s", body, seen.body)
+	if seen.path != "" {
+		t.Fatalf("an ambiguous request still reached the upstream at %q", seen.path)
+	}
+	if !strings.Contains(rec.Body.String(), "duplicate") {
+		t.Fatalf("the refusal should name the ambiguity, got %s", rec.Body.String())
+	}
+}
+
+// Same policy, not a model-only special case: any duplicate top-level key is
+// ambiguous input. Declaring one rule and enforcing another is how the two
+// readings got out of step in the first place.
+func TestDoor_DuplicateMessages_RefusedAtRouting(t *testing.T) {
+	h, seen, done := doorHarness(t, "test-model")
+	defer done()
+
+	body := []byte(`{"model":"test-model","messages":[{"role":"user","content":"a"},{"role":"system","content":"s"}],"messages":[{"role":"user","content":"b"}]}`)
+	rec := post(t, h, "/v1/messages", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400 for two `messages` keys", rec.Code)
+	}
+	if seen.path != "" {
+		t.Fatalf("an ambiguous request still reached the upstream at %q", seen.path)
+	}
+}
+
+// The policy is not Anthropic-only — proxyByModel serves every proxied
+// endpoint, so the same body is refused on the OpenAI path too.
+func TestDoor_DuplicateKeysRefusedOnChatCompletionsToo(t *testing.T) {
+	h, seen, done := doorHarness(t, "test-model")
+	defer done()
+
+	body := []byte(`{"model":"decoy","model":"test-model","messages":[{"role":"user","content":"a"}]}`)
+	if rec := post(t, h, "/v1/chat/completions", body); rec.Code != http.StatusBadRequest {
+		t.Fatalf("status %d on /v1/chat/completions, want 400 — one policy, every endpoint", rec.Code)
+	}
+	if seen.path != "" {
+		t.Fatalf("an ambiguous request reached the upstream at %q", seen.path)
 	}
 }
 
