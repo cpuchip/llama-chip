@@ -31,15 +31,18 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 )
 
 // ordObj is a JSON object that remembers its key order.
 //
 // encoding/json round-trips objects through map[string]…, which re-sorts keys
 // alphabetically — so a naive decode/mutate/encode would rewrite parts of the
-// payload this function is supposed to leave alone. The promise is "messages
-// changed, everything else untouched", and that promise is worth keeping
-// literally rather than approximately.
+// payload this function is supposed to leave alone. The promise is precise:
+// every NON-messages VALUE is byte-exact and top-level key ORDER is preserved.
+// It is NOT that the whole remainder is byte-identical — a fold re-emits the
+// object, so separators and key spellings are normalised. Claim the narrower
+// thing, because it is the one that is true.
 type ordObj []ordField
 
 type ordField struct {
@@ -58,6 +61,7 @@ func parseOrdered(raw []byte) (ordObj, error) {
 		return nil, fmt.Errorf("not a JSON object")
 	}
 	var out ordObj
+	seen := map[string]bool{}
 	for dec.More() {
 		kt, err := dec.Token()
 		if err != nil {
@@ -67,6 +71,18 @@ func parseOrdered(raw []byte) (ordObj, error) {
 		if !ok {
 			return nil, fmt.Errorf("non-string object key")
 		}
+		// DUPLICATE TOP-LEVEL KEYS ARE REFUSED, because this file is not the
+		// only parser in the request path. proxyByModel routes on `model` via
+		// json.Unmarshal, which keeps the LAST duplicate; get/set here keep the
+		// FIRST. A request carrying two of either key would be routed by one
+		// model while the fold edited a shadowed `messages` and left the
+		// effective one untouched — two parsers, two different readings of the
+		// same bytes. Refusing is smaller and safer than teaching both to agree,
+		// and the caller forwards the body unchanged so the upstream decides.
+		if seen[key] {
+			return nil, fmt.Errorf("duplicate top-level key %q", key)
+		}
+		seen[key] = true
 		var val json.RawMessage
 		if err := dec.Decode(&val); err != nil {
 			return nil, err
@@ -75,6 +91,16 @@ func parseOrdered(raw []byte) (ordObj, error) {
 	}
 	if _, err := dec.Token(); err != nil { // closing '}'
 		return nil, err
+	}
+	// TRAILING DATA IS NOT A VALID BODY. Stopping at the closing brace accepted
+	// `{...}TRAIL`, rewrote the object, and dropped TRAIL silently — which
+	// contradicts this file's own promise that an unparseable body is forwarded
+	// unchanged. Require EOF (whitespace only may follow).
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err == nil {
+		return nil, fmt.Errorf("trailing data after the JSON object")
+	} else if err != io.EOF {
+		return nil, fmt.Errorf("trailing data after the JSON object: %w", err)
 	}
 	return out, nil
 }
