@@ -48,6 +48,15 @@ func (rt *Router) Handler() http.Handler {
 	mux.HandleFunc("/v1/chat/completions", rt.proxyByModel)
 	mux.HandleFunc("/v1/completions", rt.proxyByModel)
 	mux.HandleFunc("/v1/embeddings", rt.proxyByModel)
+	// The Anthropic door. llama-server speaks the Messages API natively at the
+	// slot; the router just never forwarded it, so the real Claude Code harness
+	// could only reach the rig through a hand-run shim. Routing it by the body's
+	// `model` like everything else means the federation path gets it for free.
+	// The CLI calls both (with ?beta=true, which the mux ignores and the proxy
+	// forwards untouched); count_tokens carries no system turn, so it takes the
+	// no-fold passthrough.
+	mux.HandleFunc("/v1/messages", rt.proxyByModel)
+	mux.HandleFunc("/v1/messages/count_tokens", rt.proxyByModel)
 	mux.HandleFunc("/v1/models", rt.listModels)
 	mux.HandleFunc("/api/status", rt.status)
 	mux.HandleFunc("/api/gpu", rt.gpuStatus)
@@ -514,6 +523,20 @@ func (rt *Router) proxyByModel(w http.ResponseWriter, req *http.Request) {
 	} else {
 		writeErr(w, 404, fmt.Sprintf("no local slot or reachable peer serves model %q (see /v1/models)", probe.Model))
 		return
+	}
+
+	// Anthropic path only: fold mid-conversation system turns so a strict chat
+	// template accepts the conversation (see anthropic.go — the shim is the
+	// spec). Never fatal: an unfoldable body is forwarded exactly as it came,
+	// because the upstream's own error is a better answer than one invented
+	// here. A body with no system turn is not rewritten at all.
+	if strings.HasPrefix(req.URL.Path, "/v1/messages") {
+		if folded, n, err := foldSystemTurns(body); err != nil {
+			log.Printf("router: /v1/messages fold skipped (%v) — forwarding unchanged", err)
+		} else if n > 0 {
+			body = folded
+			log.Printf("router: folded %d mid-conversation system turn(s) into user turns for %s", n, label)
+		}
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
