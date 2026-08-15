@@ -93,6 +93,12 @@
   .poolform { border:1px solid var(--accent); border-radius:8px; padding:12px; margin-top:14px; background:#0c0e12; }
   .poolform .pf-row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
   .poolform select, .poolform input { background:#0a0c10; }
+  .modelpick { grid-column:1 / -1; }
+  .modelpick .modelrow { display:flex; gap:8px; margin-bottom:6px; }
+  .modelpick .modelrow input { flex:1; }
+  .modelpick .modelrow select { max-width:170px; }
+  .modelpick select#model { font-family:ui-monospace,Consolas,monospace; font-size:12px; }
+  .dimnote { color:var(--dim); font-weight:400; font-size:11px; }
 </style>
 </head>
 <body>
@@ -132,7 +138,18 @@
   <section class="panel">
     <h2>Load a model</h2>
     <form id="loadform">
-      <div><label>Model</label><select id="model"></select></div>
+      <div class="modelpick">
+        <label>Model <span id="modelcount" class="dimnote"></span></label>
+        <div class="modelrow">
+          <input id="modelsearch" placeholder="filter — type any part of the name (esc clears)" autocomplete="off">
+          <select id="modelsort" title="sort order (remembered)">
+            <option value="size">largest first</option>
+            <option value="name">name A–Z</option>
+            <option value="recent">recently loaded</option>
+          </select>
+        </div>
+        <select id="model" size="8"></select>
+      </div>
       <div><label>Alias (optional)</label><input id="alias" placeholder="e.g. qwen"></div>
       <div><label>Context <button type="button" class="ghost" style="padding:0 6px;font-size:11px" onclick="guessCtx()" title="estimate the largest context that fits">guess&nbsp;max</button></label><input id="ctx" type="number" value="32768" step="1024"></div>
       <div><label>Parallel</label><input id="par" type="number" value="1" min="1" step="1" title="--parallel: concurrent request slots. total context = context × parallel"></div>
@@ -245,10 +262,92 @@ async function refreshLive() {
   }).join('');
   Object.keys(livePrev).forEach(k => { if(!seen.has(k)) delete livePrev[k]; }); // forget vanished slots
 }
+// THE MODEL PICKER. ~70 GGUFs went into a bare <select> in discovery order, which
+// is a list you scroll rather than a list you search. Filtering and sorting are
+// client-side on purpose: /api/models already returns the whole library in one
+// call, so there is nothing to ask the server for and no reason to make the rig
+// answer keystrokes.
+let allModels = [];
+
+// "Recently loaded" is THIS BROWSER'S record, not the rig's. Nothing server-side
+// tracks model use — /api/models reports id, name, path, bytes and whether a
+// projector sits beside it, and a file mtime is when a GGUF was downloaded, not
+// when it was last run. So the honest source is what this browser watched you
+// load, and the label says "loaded here" rather than implying the rig knows.
+const LAST_USED_KEY = 'llamachip.lastLoadedHere';
+const SORT_KEY = 'llamachip.modelSort';
+function lastUsedMap() {
+  try { return JSON.parse(localStorage.getItem(LAST_USED_KEY)) || {}; } catch(e){ return {}; }
+}
+function markLoaded(id) {
+  try {
+    const m = lastUsedMap();
+    m[id] = Date.now();
+    localStorage.setItem(LAST_USED_KEY, JSON.stringify(m));
+  } catch(e){}
+}
+function agoLabel(ts) {
+  if (!ts) return '';
+  const mins = Math.floor((Date.now()-ts)/60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return mins+'m ago';
+  const hrs = Math.floor(mins/60);
+  if (hrs < 24) return hrs+'h ago';
+  return Math.floor(hrs/24)+'d ago';
+}
+
+// Every whitespace-separated term must appear somewhere in the model's id. That
+// makes "qwen 27b q4" find ThinkingCap-Qwen3.6-27B-Q4_K_M without demanding the
+// exact order or the punctuation.
+function modelMatches(m, terms) {
+  const hay = (m.id + ' ' + (m.name||'')).toLowerCase();
+  return terms.every(t => hay.includes(t));
+}
+
+function renderModels() {
+  const sel = $('#model');
+  const keep = sel.value;
+  const terms = $('#modelsearch').value.toLowerCase().split(/\s+/).filter(Boolean);
+  const used = lastUsedMap();
+  const sort = $('#modelsort').value;
+  let shown = allModels.filter(m => modelMatches(m, terms));
+  shown.sort((a,b) => {
+    if (sort === 'name') return a.id.localeCompare(b.id);
+    if (sort === 'recent') {
+      const d = (used[b.id]||0) - (used[a.id]||0);
+      if (d) return d;              // never-loaded models fall through to size
+      return (b.bytes||0) - (a.bytes||0);
+    }
+    return (b.bytes||0) - (a.bytes||0);
+  });
+  sel.innerHTML = shown.map(m => {
+    const marks = [fmtGB(m.bytes)];
+    if (m.supports_vision) marks.push('vision');
+    const ago = agoLabel(used[m.id]);
+    if (ago) marks.push('loaded here '+ago);
+    return `<option value="${escapeHtml(m.id)}">${escapeHtml(m.id)} — ${marks.join(' · ')}</option>`;
+  }).join('');
+  // A FILTER THAT MATCHES NOTHING MUST SAY SO. An empty <select> looks exactly
+  // like a rig that lost its library.
+  const count = $('#modelcount');
+  if (!allModels.length) {
+    count.textContent = '';
+  } else if (!shown.length) {
+    count.innerHTML = `<span style="color:var(--bad)">no model matches that filter — ${allModels.length} available</span>`;
+  } else {
+    count.textContent = shown.length === allModels.length
+      ? `(${allModels.length})` : `(${shown.length} of ${allModels.length})`;
+  }
+  // keep the operator's selection when it survived the filter
+  if (keep) { for (const o of sel.options) { if (o.value === keep) { o.selected = true; break; } } }
+  if (!sel.value && sel.options.length) sel.options[0].selected = true;
+}
+
 async function loadModels() {
   try {
     const r = await (await fetch('/api/models')).json();
-    $('#model').innerHTML = (r.models||[]).map(m => `<option value="${m.id}">${m.id} (${fmtGB(m.bytes)})</option>`).join('');
+    allModels = r.models || [];
+    renderModels();
     const b = await (await fetch('/api/backends')).json();
     const runnable = (b.backends||[]).filter(x=>x.complete);
     $('#backend').textContent = runnable.length ? `backend: ${runnable[0].variant} ${runnable[0].version}` : 'no runnable backend';
@@ -262,9 +361,18 @@ async function loadProfiles() {
   try {
     const r = await (await fetch('/api/profiles')).json();
     const ps = r.profiles||[];
+    // Profiles are already one-tap and stay that way — this only fixes the
+    // interpolation. A profile name went into an onclick attribute raw, so a
+    // name containing an apostrophe (or a quote) broke the button outright,
+    // while its neighbour two functions down was escaping properly. Config is
+    // operator-written and trusted, which makes this a correctness bug rather
+    // than a security one, but the fix is the same line either way.
     $('#profiles').innerHTML = ps.length
-      ? ps.map(p => `<button onclick="applyProfile('${p}')">${p}</button>`).join('')
+      ? ps.map(p => `<button data-profile="${escapeHtml(p)}">${escapeHtml(p)}</button>`).join('')
       : '<span style="color:var(--dim)">none configured (add "profiles" to config.json)</span>';
+    for (const b of $('#profiles').querySelectorAll('button')) {
+      b.addEventListener('click', () => applyProfile(b.dataset.profile));
+    }
   } catch(e){}
 }
 async function applyProfile(name) {
@@ -280,7 +388,13 @@ $('#loadform').addEventListener('submit', async e => {
   const body = { model:$('#model').value, alias:$('#alias').value||undefined, gpus, ctx_size:+$('#ctx').value, parallel:+$('#par').value||1, kv_cache:$('#kv').value };
   const res = await fetch('/api/load', {method:'POST', body: JSON.stringify(body)});
   if (!res.ok) { const j = await res.json().catch(()=>({})); $('#err').innerHTML='<span style="color:var(--bad)">'+escapeHtml((j.error&&j.error.message)||('load failed: '+res.status))+'</span>'; }
-  else { $('#err').innerHTML='<span style="color:var(--ok)">loading '+escapeHtml(body.alias||body.model)+'…</span>'; }
+  else {
+    // Recorded ONLY on an accepted load, so "recently loaded" never lists a
+    // model the rig refused.
+    markLoaded(body.model);
+    renderModels();
+    $('#err').innerHTML='<span style="color:var(--ok)">loading '+escapeHtml(body.alias||body.model)+'…</span>';
+  }
   refreshSlots();
 });
 async function guessCtx(){
@@ -534,6 +648,19 @@ async function poolApplyProfile(node, name) {
 }
 setInterval(()=>{ refreshGPU(); refreshSlots(); refreshChatModels(); refreshPool(); $('#clock').textContent=new Date().toLocaleTimeString(); }, 2000);
 setInterval(refreshLive, 1000); // faster cadence so tok/s reads live
+// THE SORT IS REMEMBERED; THE FILTER IS NOT, deliberately. A persisted filter
+// would greet you with 3 of 70 models and look exactly like a rig that lost its
+// library — the one state this picker must never be in silently.
+$('#modelsort').value = localStorage.getItem(SORT_KEY) || 'size';
+$('#modelsort').addEventListener('change', () => {
+  try { localStorage.setItem(SORT_KEY, $('#modelsort').value); } catch(e){}
+  renderModels();
+});
+$('#modelsearch').addEventListener('input', renderModels);
+$('#modelsearch').addEventListener('keydown', e => {
+  if (e.key === 'Escape') { $('#modelsearch').value=''; renderModels(); }
+});
+
 loadModels(); loadProfiles(); refreshGPU(); refreshSlots(); refreshChatModels(); refreshLive(); refreshPool(); renderChat();
 </script>
 </body>
