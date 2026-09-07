@@ -33,6 +33,7 @@ import (
 	"github.com/cpuchip/llama-chip/internal/models"
 	"github.com/cpuchip/llama-chip/internal/rig"
 	"github.com/cpuchip/llama-chip/internal/router"
+	"github.com/cpuchip/llama-chip/internal/telemetry"
 )
 
 func main() {
@@ -200,11 +201,15 @@ func cmdServe(args []string) error {
 			}
 			return hubclient.LocalState{Models: ms, GPUs: gpus}
 		}
-		hc := hubclient.New(fc.HubURL, fc.HubToken, f.NodeName(), fc.Advertise, interval, f, local, logger)
+		hc := hubclient.New(fc.HubURL, cfg.ResolvedHubToken(), f.NodeName(), fc.Advertise, interval, f, local, logger)
 		hc.Run(fedCtx)
 	}
 
-	srv := &http.Server{Handler: router.New(r, f, logger).Handler()}
+	rt := router.New(r, f, logger)
+	tel := telemetry.New(r, logger) // the measured half of the slot contract: who holds each card, per-slot load
+	go tel.Run(fedCtx, 5*time.Second)
+	rt.SetTelemetry(tel)
+	srv := &http.Server{Handler: rt.Handler()}
 	go func() {
 		c := make(chan os.Signal, 1)
 		// Catch SIGTERM too (e.g. `kill <pid>`, systemd/docker stop), not just SIGINT —

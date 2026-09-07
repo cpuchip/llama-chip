@@ -60,10 +60,12 @@ type Federation struct {
 	NodeName        string `json:"node_name,omitempty"` // this node's name (status + gossip)
 	Advertise       string `json:"advertise,omitempty"` // URL peers use to reach THIS node (its mesh address)
 	Token           string `json:"token,omitempty"`     // optional bearer; when set, peer requests must carry it
+	TokenEnv        string `json:"token_env,omitempty"` // env var holding that bearer (wins over token when set and non-empty)
 	PollIntervalSec int    `json:"poll_interval_sec,omitempty"`
 	Peers           []Peer `json:"peers,omitempty"`
-	HubURL          string `json:"hub_url,omitempty"`   // optional coordinator (llama.example.com) for roster + tokens
-	HubToken        string `json:"hub_token,omitempty"` // this node's join token for the hub
+	HubURL          string `json:"hub_url,omitempty"`       // optional coordinator (llama.example.com) for roster + tokens
+	HubToken        string `json:"hub_token,omitempty"`     // this node's join token for the hub
+	HubTokenEnv     string `json:"hub_token_env,omitempty"` // env var holding the join token (wins over hub_token when set and non-empty); keeps secrets out of a config that gets pasted
 
 	// PeerTokens is an optional per-peer OUTBOUND bearer map (peer/node name -> token) attached
 	// when THIS node proxies a chat to that peer. It's how a keyless mesh node still authenticates
@@ -95,6 +97,9 @@ type Config struct {
 
 	// Federation is optional: list peer nodes to pool GPUs across machines (see package fed).
 	Federation *Federation `json:"federation,omitempty"`
+
+	// Yield is optional: give a card up to a game and move the work to the fleet (see Yield).
+	Yield *Yield `json:"yield,omitempty"`
 }
 
 // FedConfig converts the JSON federation block into a fed.Config. Returns the zero value
@@ -108,15 +113,65 @@ func (c *Config) FedConfig() fed.Config {
 	for _, p := range f.Peers {
 		peers = append(peers, fed.PeerConfig{Name: p.Name, URL: strings.TrimRight(p.URL, "/")})
 	}
+	token := f.Token
+	if f.TokenEnv != "" {
+		if v := os.Getenv(f.TokenEnv); v != "" {
+			token = v
+		}
+	}
 	return fed.Config{
 		NodeName:     f.NodeName,
 		Advertise:    f.Advertise,
-		Token:        f.Token,
+		Token:        token,
 		Peers:        peers,
 		HubURL:       strings.TrimRight(f.HubURL, "/"),
 		PollInterval: time.Duration(f.PollIntervalSec) * time.Second,
 		PeerTokens:   f.PeerTokens,
 	}
+}
+
+// ResolvedHubToken is the hub join token after the env override.
+func (c *Config) ResolvedHubToken() string {
+	if c.Federation == nil {
+		return ""
+	}
+	if c.Federation.HubTokenEnv != "" {
+		if v := os.Getenv(c.Federation.HubTokenEnv); v != "" {
+			return v
+		}
+	}
+	return c.Federation.HubToken
+}
+
+// Yield is the yield-to-the-foreground policy: when something not ours takes VRAM on a card
+// (a game), the rig gives the card up, moves the work to the fleet, and takes it back when the
+// foreign use is gone.
+type Yield struct {
+	Enabled    bool `json:"enabled"`
+	ForeignMiB int  `json:"foreign_mib,omitempty"` // foreign VRAM that counts as "taken" (default 1024)
+	HoldSec    int  `json:"hold_s,omitempty"`      // foreign must persist this long before yielding (default 5)
+	RestoreSec int  `json:"restore_s,omitempty"`   // foreign must be gone this long before restoring (default 30)
+}
+
+func (y *Yield) ForeignThreshold() int {
+	if y == nil || y.ForeignMiB <= 0 {
+		return 1024
+	}
+	return y.ForeignMiB
+}
+
+func (y *Yield) Hold() time.Duration {
+	if y == nil || y.HoldSec <= 0 {
+		return 5 * time.Second
+	}
+	return time.Duration(y.HoldSec) * time.Second
+}
+
+func (y *Yield) Restore() time.Duration {
+	if y == nil || y.RestoreSec <= 0 {
+		return 30 * time.Second
+	}
+	return time.Duration(y.RestoreSec) * time.Second
 }
 
 // Load reads a config file and fills defaults.

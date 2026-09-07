@@ -22,6 +22,8 @@ import (
 
 	"github.com/cpuchip/llama-chip/internal/backends"
 	"github.com/cpuchip/llama-chip/internal/config"
+	"github.com/cpuchip/llama-chip/internal/gguf"
+	"github.com/cpuchip/llama-chip/internal/gpu"
 	"github.com/cpuchip/llama-chip/internal/models"
 )
 
@@ -52,6 +54,39 @@ type Instance struct {
 	cmd      *exec.Cmd
 	exitCh   chan error // the current process's Wait result (recreated each launch)
 	stopping bool
+	pid      int         // the launched llama-server's PID (0 when not running / external)
+	baseline map[int]int // external slots: each pinned card's mem_used (MiB) when the upstream first went healthy
+
+	vramOnce sync.Once
+	vramEst  int // MiB the slot is expected to hold: weights + KV at its context + overhead (0 = unknown)
+}
+
+// VRAMEstimate is the slot's expected VRAM in MiB: the model file plus the KV cache at the slot's
+// context (from the GGUF's real attention dims, the same math as /api/guess-context) plus a fixed
+// compute overhead. 0 for external slots and unparseable models. Computed once per instance.
+func (in *Instance) VRAMEstimate() int {
+	in.vramOnce.Do(func() {
+		if in.External != nil || in.Model.Bytes == 0 {
+			return
+		}
+		est := float64(in.Model.Bytes)/(1<<20) + 700
+		if in.Slot.CtxSize > 0 {
+			bytesPerElem := 1.0625 // q8_0
+			switch in.Slot.KVCache {
+			case "f16", "":
+				bytesPerElem = 2.0
+			case "q4_0":
+				bytesPerElem = 0.5625
+			}
+			if p, err := gguf.Read(in.Model.Path); err == nil {
+				if b := p.KVBytesPerToken(bytesPerElem); b > 0 {
+					est += b * float64(in.Slot.CtxSize) / (1 << 20)
+				}
+			}
+		}
+		in.vramEst = int(est)
+	})
+	return in.vramEst
 }
 
 func (in *Instance) isStopping() bool {
@@ -73,6 +108,13 @@ type Status struct {
 	LastErr  string  `json:"last_err,omitempty"`
 	SizeGB   float64 `json:"size_gb"`
 	External string  `json:"external,omitempty"` // the upstream root URL for a slot the rig does not launch
+
+	// The slot contract (fleet): what a peer or a scheduler needs to place work.
+	Kind        string      `json:"kind"`                   // "llama-server" | "external"
+	Loaded      bool        `json:"loaded"`                 // healthy and answering
+	PID         int         `json:"pid,omitempty"`          // the llama-server process (attribution of VRAM)
+	VRAMEstMiB  int         `json:"vram_est_mib,omitempty"` // expected VRAM: weights + KV at ctx + overhead
+	BaselineMiB map[int]int `json:"baseline_mib,omitempty"` // external: card -> mem_used when first healthy
 }
 
 func (in *Instance) snapshot() Status {
@@ -86,9 +128,19 @@ func (in *Instance) snapshot() Status {
 		Name: in.Slot.Name(), Model: in.Model.ID, GPUs: in.Slot.GPUs, Port: in.Port,
 		Ctx: in.Slot.CtxSize, Parallel: par, State: in.state, Restarts: in.restarts, LastErr: in.lastErr,
 		SizeGB: float64(in.Model.Bytes) / (1 << 30),
+		Kind:   "llama-server", Loaded: in.state == Healthy, PID: in.pid,
 	}
 	if in.External != nil {
 		st.External = in.External.String()
+		st.Kind = "external"
+		if len(in.baseline) > 0 {
+			st.BaselineMiB = make(map[int]int, len(in.baseline))
+			for k, v := range in.baseline {
+				st.BaselineMiB[k] = v
+			}
+		}
+	} else {
+		st.VRAMEstMiB = in.vramEst // filled by VRAMEstimate(); read under the lock without recomputing
 	}
 	return st
 }
@@ -471,7 +523,9 @@ func (r *Rig) launch(in *Instance) error {
 	in.mu.Lock()
 	in.cmd = cmd
 	in.exitCh = exitCh
+	in.pid = cmd.Process.Pid
 	in.mu.Unlock()
+	in.VRAMEstimate() // parse the GGUF once, off the snapshot path
 	go in.drain(stderr)
 	go in.drain(stdout)
 	go func() { exitCh <- cmd.Wait() }() // the single Wait — populates exit + lets us notice a crash
@@ -548,7 +602,8 @@ func (r *Rig) args(in *Instance) []string {
 	} else {
 		a = append(a, "--split-mode", "none")
 	}
-	a = append(a, "--jinja") // OpenAI tool-call / chat-template support
+	a = append(a, "--jinja")   // OpenAI tool-call / chat-template support
+	a = append(a, "--metrics") // /metrics: requests processing + deferred, for the slot contract's queue depth
 	a = append(a, s.ExtraArgs...)
 	return a
 }
@@ -687,6 +742,7 @@ func (r *Rig) superviseExternal(in *Instance) {
 			in.set(st, why)
 			if st == Healthy {
 				r.log.Printf("[%s] external upstream healthy (%s)", in.Slot.Name(), in.External)
+				in.captureBaseline()
 			} else {
 				r.log.Printf("[%s] external upstream not ready: %s", in.Slot.Name(), why)
 			}
@@ -703,6 +759,34 @@ func (r *Rig) superviseExternal(in *Instance) {
 
 // NewEmptyForTest builds a rig with no backend and no slots, for tests that only need external
 // slots (nothing is ever launched).
+// captureBaseline records, for an external slot, how much of each pinned card is in use the
+// first time the upstream answers healthy. The rig did not launch that process (a vLLM container
+// is a WSL2 VM's memory on Windows) so it cannot attribute VRAM by PID; the card's usage at that
+// moment stands in for "ours" and anything above it later counts as foreign. Taken once.
+func (in *Instance) captureBaseline() {
+	in.mu.Lock()
+	have := in.baseline != nil
+	in.mu.Unlock()
+	if have {
+		return
+	}
+	gs, err := gpu.Query()
+	if err != nil {
+		return
+	}
+	base := map[int]int{}
+	for _, g := range gs {
+		for _, idx := range in.Slot.GPUs {
+			if g.Index == idx {
+				base[idx] = g.MemUsed
+			}
+		}
+	}
+	in.mu.Lock()
+	in.baseline = base
+	in.mu.Unlock()
+}
+
 func NewEmptyForTest(logger *log.Logger) *Rig {
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)

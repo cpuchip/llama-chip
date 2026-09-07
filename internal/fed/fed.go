@@ -53,12 +53,14 @@ type Route struct {
 
 // PeerHealth is the observed state of one peer (for status/UI).
 type PeerHealth struct {
-	Name     string    `json:"name"`
-	URL      string    `json:"url"`
-	Online   bool      `json:"online"`
-	Models   []string  `json:"models"`
-	LastSeen time.Time `json:"last_seen,omitempty"`
-	LastErr  string    `json:"last_err,omitempty"`
+	Name     string     `json:"name"`
+	URL      string     `json:"url"`
+	Online   bool       `json:"online"`
+	Models   []string   `json:"models"`
+	Slots    []PeerSlot `json:"slots,omitempty"` // the peer's slot contract, when it publishes one
+	GPUs     []PeerGPU  `json:"gpus,omitempty"`
+	LastSeen time.Time  `json:"last_seen,omitempty"`
+	LastErr  string     `json:"last_err,omitempty"`
 }
 
 // Federation maintains the live remote-model map by polling peers.
@@ -76,9 +78,35 @@ type Federation struct {
 
 // localView is what a peer returns from /api/fed/local — its LOCAL-only model list.
 type localView struct {
-	Node      string   `json:"node"`
-	Advertise string   `json:"advertise,omitempty"`
-	Models    []string `json:"models"`
+	Node      string     `json:"node"`
+	Advertise string     `json:"advertise,omitempty"`
+	Models    []string   `json:"models"`
+	Slots     []PeerSlot `json:"slots,omitempty"`
+	GPUs      []PeerGPU  `json:"gpus,omitempty"`
+}
+
+// PeerSlot is one slot as a peer advertises it: enough to place work (loaded, queue depth,
+// expected VRAM) without asking the peer again. Older peers omit these; fields stay zero.
+type PeerSlot struct {
+	Name       string  `json:"name"`
+	Kind       string  `json:"kind,omitempty"`
+	GPUs       []int   `json:"gpus"`
+	Loaded     bool    `json:"loaded"`
+	Inflight   int     `json:"inflight"`
+	Queued     int     `json:"queued"`
+	VRAMEstMiB int     `json:"vram_est_mib,omitempty"`
+	TokS       float64 `json:"tok_s,omitempty"`
+}
+
+// PeerGPU is one card as a peer advertises it.
+type PeerGPU struct {
+	Index      int    `json:"index"`
+	UUID       string `json:"uuid,omitempty"`
+	Name       string `json:"name"`
+	MemTotal   int    `json:"mem_total_mib"`
+	MemFree    int    `json:"mem_free_mib"`
+	ForeignMiB int    `json:"foreign_mib"`
+	Yielding   bool   `json:"yielding"`
 }
 
 // New builds a Federation from config. Returns nil only when the node neither federates NOR gates:
@@ -365,7 +393,8 @@ func (f *Federation) pollPeer(ctx context.Context, p PeerConfig) PeerHealth {
 	// A bearer-gated static peer needs ITS token to be polled — honor the same per-peer override
 	// used when proxying (else the node's default token). Roster-discovered peers skip this path.
 	tok := f.OutboundToken(name)
-	models, err := f.fetchLocal(ctx, p.URL, tok)
+	lv, err := f.fetchLocal(ctx, p.URL, tok)
+	models := lv.Models
 	if err != nil {
 		if models, err = f.fetchV1Models(ctx, p.URL, tok); err != nil {
 			h.LastErr = err.Error()
@@ -374,16 +403,18 @@ func (f *Federation) pollPeer(ctx context.Context, p PeerConfig) PeerHealth {
 	}
 	h.Online = true
 	h.Models = models
+	h.Slots = lv.Slots
+	h.GPUs = lv.GPUs
 	h.LastSeen = nowFromCtx(ctx)
 	return h
 }
 
-func (f *Federation) fetchLocal(ctx context.Context, base, token string) ([]string, error) {
+func (f *Federation) fetchLocal(ctx context.Context, base, token string) (localView, error) {
 	var lv localView
 	if err := f.getJSON(ctx, base+"/api/fed/local", token, &lv); err != nil {
-		return nil, err
+		return localView{}, err
 	}
-	return lv.Models, nil
+	return lv, nil
 }
 
 func (f *Federation) fetchV1Models(ctx context.Context, base, token string) ([]string, error) {

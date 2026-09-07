@@ -25,6 +25,7 @@ import (
 	"github.com/cpuchip/llama-chip/internal/gpu"
 	"github.com/cpuchip/llama-chip/internal/models"
 	"github.com/cpuchip/llama-chip/internal/rig"
+	"github.com/cpuchip/llama-chip/internal/telemetry"
 )
 
 //go:embed static/*
@@ -36,11 +37,58 @@ type Router struct {
 	rig *rig.Rig
 	fed *fed.Federation // may be nil (standalone node)
 	log *log.Logger
+	tel *telemetry.Sampler // may be nil (tests); the slot contract's measured half
 }
 
 func New(r *rig.Rig, f *fed.Federation, logger *log.Logger) *Router {
 	return &Router{rig: r, fed: f, log: logger}
 }
+
+// SetTelemetry attaches the sampler: /api/status and /api/fed/local then carry the measured
+// fields (ours/foreign VRAM, in-flight, cache hit rate) and every proxied request is observed.
+func (rt *Router) SetTelemetry(t *telemetry.Sampler) { rt.tel = t }
+
+// statsWriter wraps the client's ResponseWriter to time the first byte, keep the tail of the
+// body (where usage lives) and record the status, without buffering the stream.
+type statsWriter struct {
+	http.ResponseWriter
+	status  int
+	first   time.Time
+	tail    []byte
+	written int64
+}
+
+const tailKeep = 64 << 10
+
+func (sw *statsWriter) WriteHeader(code int) {
+	if sw.status == 0 {
+		sw.status = code
+	}
+	sw.ResponseWriter.WriteHeader(code)
+}
+
+func (sw *statsWriter) Write(b []byte) (int, error) {
+	if sw.status == 0 {
+		sw.status = 200
+	}
+	if sw.first.IsZero() && len(b) > 0 {
+		sw.first = time.Now()
+	}
+	sw.written += int64(len(b))
+	sw.tail = append(sw.tail, b...)
+	if len(sw.tail) > 2*tailKeep {
+		sw.tail = append([]byte(nil), sw.tail[len(sw.tail)-tailKeep:]...)
+	}
+	return sw.ResponseWriter.Write(b)
+}
+
+func (sw *statsWriter) Flush() {
+	if f, ok := sw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (sw *statsWriter) Unwrap() http.ResponseWriter { return sw.ResponseWriter }
 
 // Handler returns the http.Handler (mount the UI on top in Phase 3).
 func (rt *Router) Handler() http.Handler {
@@ -118,14 +166,31 @@ func isLoopback(remoteAddr string) bool {
 // two mutually-peered nodes from looping.
 func (rt *Router) fedLocal(w http.ResponseWriter, _ *http.Request) {
 	var local []string
-	for _, s := range rt.rig.Snapshot() {
+	var slots []fed.PeerSlot
+	for _, s := range rt.slotStatuses() {
 		local = append(local, s.Name)
+		slots = append(slots, fed.PeerSlot{
+			Name: s.Name, Kind: s.Kind, GPUs: s.GPUs, Loaded: s.Loaded,
+			Inflight: s.Inflight, Queued: s.Queued, VRAMEstMiB: s.VRAMEstMiB, TokS: s.TokS,
+		})
 	}
-	writeJSON(w, 200, map[string]any{
+	out := map[string]any{
 		"node":      rt.fed.NodeName(),
 		"advertise": rt.fed.Advertise(),
 		"models":    local,
-	})
+		"slots":     slots,
+	}
+	if rt.tel != nil {
+		var gpus []fed.PeerGPU
+		for _, g := range rt.tel.Snapshot().GPUs {
+			gpus = append(gpus, fed.PeerGPU{
+				Index: g.Index, UUID: g.UUID, Name: g.Name, MemTotal: g.MemTotal, MemFree: g.MemFree,
+				ForeignMiB: g.ForeignMiB, Yielding: g.Yielding,
+			})
+		}
+		out["gpus"] = gpus
+	}
+	writeJSON(w, 200, out)
 }
 
 // SlotLive is one backend slot's live state (a request in flight, or idle).
@@ -523,7 +588,7 @@ func (rt *Router) proxyByModel(w http.ResponseWriter, req *http.Request) {
 	}
 
 	var target *url.URL
-	var label, bearer string
+	var label, bearer, statSlot string
 	// ?node=<name> pins the request to a SPECIFIC node over the mesh — the chat UI uses it to test
 	// a chosen remote even when the local rig serves a model of the same name. Self / unknown falls
 	// through to normal local-first resolution. The param is stripped before forwarding so the peer
@@ -539,6 +604,7 @@ func (rt *Router) proxyByModel(w http.ResponseWriter, req *http.Request) {
 		bearer = rt.peerBearer(pin)
 		stripQueryParam(req, "node")
 	} else if in, ok := rt.rig.Resolve(probe.Model); ok {
+		statSlot = in.Slot.Name()
 		if in.External != nil { // a server this rig does not launch: proxy to its root, with its bearer
 			target = in.External
 			label = fmt.Sprintf("external slot %q (%s)", in.Slot.Name(), in.External)
@@ -581,7 +647,22 @@ func (rt *Router) proxyByModel(w http.ResponseWriter, req *http.Request) {
 	if bearer != "" { // authenticate to the peer's federation endpoint (forwarded by the proxy)
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
-	proxy.ServeHTTP(w, req)
+	if rt.tel == nil || statSlot == "" {
+		proxy.ServeHTTP(w, req)
+		return
+	}
+	// A local slot: observe the request for the slot contract (ttft, tok/s, cache hit rate).
+	t0 := time.Now()
+	sw := &statsWriter{ResponseWriter: w}
+	proxy.ServeHTTP(sw, req)
+	obs := telemetry.Obs{At: t0, Dur: time.Since(t0), Status: sw.status}
+	if !sw.first.IsZero() {
+		obs.TTFT = sw.first.Sub(t0)
+	}
+	if u, ok := telemetry.ParseUsageTail(sw.tail); ok {
+		obs.PromptTok, obs.ComplTok, obs.CachedTok = u.PromptTok, u.ComplTok, u.CachedTok
+	}
+	rt.tel.Stats().Observe(statSlot, obs)
 }
 
 // listModels reports the models THIS endpoint can serve in OpenAI /v1/models shape — local
@@ -612,9 +693,49 @@ func (rt *Router) listModels(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, 200, map[string]any{"object": "list", "data": data})
 }
 
+// SlotStatus is the slot contract: the rig's configured and supervised view of a slot joined
+// with the sampler's measured view. What a peer or a scheduler needs to place work.
+type SlotStatus struct {
+	rig.Status
+	Inflight     int     `json:"inflight"`
+	Queued       int     `json:"queued"`
+	Requests     int     `json:"requests"`
+	Errors       int     `json:"errors"`
+	CacheHitRate float64 `json:"cache_hit_rate"`
+	TokS         float64 `json:"tok_s"`
+	TTFTms       float64 `json:"ttft_ms"`
+}
+
+func (rt *Router) slotStatuses() []SlotStatus {
+	var snap telemetry.Snapshot
+	if rt.tel != nil {
+		snap = rt.tel.Snapshot()
+	}
+	var out []SlotStatus
+	for _, s := range rt.rig.Snapshot() {
+		ss := SlotStatus{Status: s}
+		if v, ok := snap.Slots[s.Name]; ok {
+			ss.Inflight, ss.Queued = v.Inflight, v.Queued
+			ss.Requests, ss.Errors = v.Requests, v.Errors
+			ss.CacheHitRate, ss.TokS, ss.TTFTms = v.CacheHitRate, v.TokS, v.TTFTms
+		}
+		out = append(out, ss)
+	}
+	return out
+}
+
 func (rt *Router) status(w http.ResponseWriter, _ *http.Request) {
-	out := map[string]any{"slots": rt.rig.Snapshot()}
+	out := map[string]any{"slots": rt.slotStatuses()}
+	if rt.tel != nil {
+		snap := rt.tel.Snapshot()
+		out["gpus"] = snap.GPUs
+		out["sampled_at"] = snap.At
+		if snap.Err != "" {
+			out["telemetry_err"] = snap.Err
+		}
+	}
 	if rt.fed.Enabled() {
+		out["node"] = rt.fed.NodeName()
 		out["federation"] = map[string]any{
 			"node":  rt.fed.NodeName(),
 			"peers": rt.fed.Peers(),
