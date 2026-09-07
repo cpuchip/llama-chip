@@ -189,15 +189,38 @@ func (ix *Index) Hash(path string) (string, error) {
 	return sum, nil
 }
 
-// FindByHash returns the path of a cached file with this hash, if the node has one.
+// FindByHash returns the path of a cached file with this hash, if the node still has one.
+//
+// Like Lookup it re-reads the cache on a miss: this is the path /api/models/blob serves from, and
+// a peer fetching by --sha256 never touches /api/models first. Without the reload a freshly
+// started node answers 404 for a model it has indexed, until something happens to list the
+// catalogue — the endpoint would work only in the order nobody guarantees.
 func (ix *Index) FindByHash(sum string) (string, bool) {
 	sum = strings.ToLower(strings.TrimSpace(sum))
+	if p, ok := ix.findByHash(sum); ok {
+		return p, true
+	}
+	if !ix.reload() {
+		return "", false
+	}
+	return ix.findByHash(sum)
+}
+
+// findByHash scans what is in memory, skipping entries the file on disk has outgrown. Serving a
+// stale entry would send new bytes under an old hash: the fetcher rejects them after paying for
+// the whole transfer, so the cheap stat here saves a multi-gigabyte round trip.
+func (ix *Index) findByHash(sum string) (string, bool) {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 	for p, e := range ix.byKey {
-		if e.SHA256 == sum {
-			return p, true
+		if e.SHA256 != sum {
+			continue
 		}
+		fi, err := os.Stat(p)
+		if err != nil || e.stale(fi) {
+			continue // gone or rewritten: this node no longer has that content
+		}
+		return p, true
 	}
 	return "", false
 }
@@ -260,6 +283,11 @@ func Handler(resolve func(sum string) (string, bool)) http.HandlerFunc {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("X-Content-SHA256", sum)
+		// Name the file. ServeContent sends no Content-Disposition, so without this a fetched
+		// model lands under its hash — 0cfaf469….gguf — which no loader recognises and the
+		// operator has to rename by hand. The base name only; a peer never gets to suggest a path.
+		w.Header().Set("Content-Disposition",
+			mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(path)}))
 		// ServeContent gives us range requests, If-Range and 206 handling for free — which is
 		// the whole resumability story on the serving side.
 		http.ServeContent(w, r, filepath.Base(path), fi.ModTime(), f)

@@ -70,7 +70,7 @@ func cmdIndex(args []string) error {
 				continue
 			}
 		}
-		fmt.Printf("hashing  %s  (%.2f GiB)...\n", m.ID, float64(m.Bytes)/(1<<30))
+		fmt.Printf("hashing  %s  (%s)...\n", m.ID, humanBytes(m.Bytes))
 		t0 := time.Now()
 		sum, err := ix.Hash(m.Path)
 		if err != nil {
@@ -85,8 +85,8 @@ func cmdIndex(args []string) error {
 		bytes += m.Bytes
 	}
 
-	fmt.Printf("\n%d indexed, %d already cached, %.2f GiB read in %s\n",
-		hashed, skipped, float64(bytes)/(1<<30), time.Since(start).Round(time.Second))
+	fmt.Printf("\n%d indexed, %d already cached, %s read in %s\n",
+		hashed, skipped, humanBytes(bytes), time.Since(start).Round(time.Second))
 	fmt.Printf("cache: %s\n", path)
 	if hashed > 0 {
 		fmt.Println("a running node picks these up without a restart; peers can now fetch them by name")

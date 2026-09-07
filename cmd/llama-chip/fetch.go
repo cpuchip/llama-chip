@@ -60,8 +60,8 @@ func cmdFetch(args []string) error {
 			return err
 		}
 		sum, name = m.SHA256, m.ID
-		fmt.Printf("resolved %q on %s: %s\n  %s  (%.2f GiB)\n",
-			query, *from, m.ID, sum, float64(m.Bytes)/(1<<30))
+		fmt.Printf("resolved %q on %s: %s\n  %s  (%s)\n",
+			query, *from, m.ID, sum, humanBytes(m.Bytes))
 	}
 
 	start := time.Now()
@@ -85,6 +85,19 @@ func cmdFetch(args []string) error {
 		fmt.Printf("  note: saved under the peer's filename; its catalogue id there was %s\n", name)
 	}
 	return nil
+}
+
+// humanBytes formats a size in the unit that carries information at that scale: reporting a
+// 3.5 MiB file as "0.00 GiB" tells the operator nothing.
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.2f GiB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	default:
+		return fmt.Sprintf("%d bytes", n)
+	}
 }
 
 // peerModel is the subset of /api/models this command needs.
