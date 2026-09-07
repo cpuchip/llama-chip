@@ -54,6 +54,8 @@ func main() {
 		err = cmdServe(os.Args[2:])
 	case "runtime":
 		err = lms.Run(append([]string{"runtime"}, os.Args[2:]...)...) // passthrough to LM Studio's lms
+	case "fetch":
+		err = cmdFetch(os.Args[2:])
 	case "pull":
 		err = cmdPull(os.Args[2:])
 	case "pull-ggml":
@@ -82,6 +84,7 @@ usage:
   llama-chip runtime …  manage inference runtimes via LM Studio's lms (ls|get|select|update|remove)
   llama-chip pull [q]   download the latest runtime via LM Studio (default q: llama.cpp:cuda12)
   llama-chip pull-ggml [bNNNN|latest]  pull a llama.cpp build straight from ggml-org releases — use via "backend":"ggml@latest"
+  llama-chip fetch <model> --from <peer>   fetch a GGUF from a fleet peer over the mesh — resumable, sha256-verified, never through the hub
 `)
 }
 
