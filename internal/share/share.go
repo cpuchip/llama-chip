@@ -60,6 +60,23 @@ type Index struct {
 	mu    sync.Mutex
 	path  string // where the cache is persisted
 	byKey map[string]Entry
+
+	// Identity of the cache file as we last read it. A miss re-checks these before answering
+	// "no": `llama-chip index` runs in a SEPARATE process, so without this a freshly indexed
+	// model stays invisible to the running server until it is restarted.
+	loadedMod  time.Time
+	loadedSize int64
+}
+
+// DefaultIndexPath is where a node keeps its hash cache: $XDG_CACHE_HOME/llama-chip/hashes.json,
+// else ~/.cache/llama-chip/hashes.json. It is a cache, not config — deleting it costs re-hashing
+// and nothing else.
+func DefaultIndexPath() string {
+	if d := os.Getenv("XDG_CACHE_HOME"); d != "" {
+		return filepath.Join(d, "llama-chip", "hashes.json")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".cache", "llama-chip", "hashes.json")
 }
 
 // OpenIndex loads (or starts) the cache at path. A missing or corrupt cache is not an error:
@@ -77,7 +94,40 @@ func OpenIndex(path string) *Index {
 	for _, e := range list {
 		ix.byKey[e.Path] = e
 	}
+	if fi, err := os.Stat(path); err == nil {
+		ix.loadedMod, ix.loadedSize = fi.ModTime(), fi.Size()
+	}
 	return ix
+}
+
+// reload re-reads the cache file when it has changed since we last read it, merging what it
+// holds into memory. Returns whether a re-read happened. On the common path this costs one stat.
+func (ix *Index) reload() bool {
+	fi, err := os.Stat(ix.path)
+	if err != nil {
+		return false
+	}
+	ix.mu.Lock()
+	unchanged := fi.ModTime().Equal(ix.loadedMod) && fi.Size() == ix.loadedSize
+	ix.mu.Unlock()
+	if unchanged {
+		return false
+	}
+	b, err := os.ReadFile(ix.path)
+	if err != nil {
+		return false
+	}
+	var list []Entry
+	if json.Unmarshal(b, &list) != nil {
+		return false // a half-written or damaged cache costs a miss, never a crash
+	}
+	ix.mu.Lock()
+	for _, e := range list {
+		ix.byKey[e.Path] = e
+	}
+	ix.loadedMod, ix.loadedSize = fi.ModTime(), fi.Size()
+	ix.mu.Unlock()
+	return true
 }
 
 // Lookup returns a cached hash if it still matches the file on disk.
@@ -87,10 +137,21 @@ func (ix *Index) Lookup(path string) (string, bool) {
 		return "", false
 	}
 	ix.mu.Lock()
-	defer ix.mu.Unlock()
 	e, ok := ix.byKey[path]
+	ix.mu.Unlock()
 	if !ok || e.stale(fi) {
-		return "", false
+		// A miss may only mean another process hashed it after we loaded. Re-read before
+		// answering "no", or an operator indexes a model and the server keeps saying it has
+		// no hash until someone restarts it.
+		if !ix.reload() {
+			return "", false
+		}
+		ix.mu.Lock()
+		e, ok = ix.byKey[path]
+		ix.mu.Unlock()
+		if !ok || e.stale(fi) {
+			return "", false
+		}
 	}
 	return e.SHA256, true
 }
@@ -128,15 +189,38 @@ func (ix *Index) Hash(path string) (string, error) {
 	return sum, nil
 }
 
-// FindByHash returns the path of a cached file with this hash, if the node has one.
+// FindByHash returns the path of a cached file with this hash, if the node still has one.
+//
+// Like Lookup it re-reads the cache on a miss: this is the path /api/models/blob serves from, and
+// a peer fetching by --sha256 never touches /api/models first. Without the reload a freshly
+// started node answers 404 for a model it has indexed, until something happens to list the
+// catalogue — the endpoint would work only in the order nobody guarantees.
 func (ix *Index) FindByHash(sum string) (string, bool) {
 	sum = strings.ToLower(strings.TrimSpace(sum))
+	if p, ok := ix.findByHash(sum); ok {
+		return p, true
+	}
+	if !ix.reload() {
+		return "", false
+	}
+	return ix.findByHash(sum)
+}
+
+// findByHash scans what is in memory, skipping entries the file on disk has outgrown. Serving a
+// stale entry would send new bytes under an old hash: the fetcher rejects them after paying for
+// the whole transfer, so the cheap stat here saves a multi-gigabyte round trip.
+func (ix *Index) findByHash(sum string) (string, bool) {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 	for p, e := range ix.byKey {
-		if e.SHA256 == sum {
-			return p, true
+		if e.SHA256 != sum {
+			continue
 		}
+		fi, err := os.Stat(p)
+		if err != nil || e.stale(fi) {
+			continue // gone or rewritten: this node no longer has that content
+		}
+		return p, true
 	}
 	return "", false
 }
@@ -199,6 +283,11 @@ func Handler(resolve func(sum string) (string, bool)) http.HandlerFunc {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("X-Content-SHA256", sum)
+		// Name the file. ServeContent sends no Content-Disposition, so without this a fetched
+		// model lands under its hash — 0cfaf469….gguf — which no loader recognises and the
+		// operator has to rename by hand. The base name only; a peer never gets to suggest a path.
+		w.Header().Set("Content-Disposition",
+			mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(path)}))
 		// ServeContent gives us range requests, If-Range and 206 handling for free — which is
 		// the whole resumability story on the serving side.
 		http.ServeContent(w, r, filepath.Base(path), fi.ModTime(), f)

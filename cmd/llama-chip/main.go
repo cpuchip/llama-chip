@@ -33,6 +33,7 @@ import (
 	"github.com/cpuchip/llama-chip/internal/models"
 	"github.com/cpuchip/llama-chip/internal/rig"
 	"github.com/cpuchip/llama-chip/internal/router"
+	"github.com/cpuchip/llama-chip/internal/share"
 	"github.com/cpuchip/llama-chip/internal/telemetry"
 	"github.com/cpuchip/llama-chip/internal/yield"
 )
@@ -56,6 +57,8 @@ func main() {
 		err = lms.Run(append([]string{"runtime"}, os.Args[2:]...)...) // passthrough to LM Studio's lms
 	case "fetch":
 		err = cmdFetch(os.Args[2:])
+	case "index":
+		err = cmdIndex(os.Args[2:])
 	case "pull":
 		err = cmdPull(os.Args[2:])
 	case "pull-ggml":
@@ -209,7 +212,11 @@ func cmdServe(args []string) error {
 		hc.Run(fedCtx)
 	}
 
-	rt := router.New(r, f, logger)
+	// The sha256 index behind /api/models/blob and the sha256 field on /api/models. Opening it
+	// is cheap and hashes nothing: entries are earned by `llama-chip index`, so a node never
+	// stalls at boot hashing a library. Without this the blob route answers 404 and every model
+	// advertises no hash — the share feature exists but is switched off.
+	rt := router.New(r, f, logger).WithShare(share.OpenIndex(share.DefaultIndexPath()))
 	tel := telemetry.New(r, logger) // the measured half of the slot contract: who holds each card, per-slot load
 	go tel.Run(fedCtx, 5*time.Second)
 	rt.SetTelemetry(tel)

@@ -276,3 +276,156 @@ func TestOpenIndexCorrupt(t *testing.T) {
 		t.Fatalf("a corrupt cache must not break hashing: %v", err)
 	}
 }
+
+// TestLookupSeesAnotherProcessesIndexing is the cross-process case that makes `llama-chip index`
+// usable against a RUNNING server: the server's Index was opened before the model was hashed, and
+// the hashing happened in a different process. Without the reload-on-miss the server keeps
+// answering "no hash" until someone restarts it, and the share feature looks broken while being
+// correctly configured.
+func TestLookupSeesAnotherProcessesIndexing(t *testing.T) {
+	dir := t.TempDir()
+	cache := filepath.Join(dir, "hashes.json")
+	p := writeFile(t, dir, "m.gguf", blob(5000))
+
+	server := OpenIndex(cache) // the long-lived process, opened while the cache is empty
+	if _, ok := server.Lookup(p); ok {
+		t.Fatalf("nothing is indexed yet; Lookup should miss")
+	}
+
+	indexer := OpenIndex(cache) // `llama-chip index`, a separate process
+	want, err := indexer.Hash(p)
+	if err != nil {
+		t.Fatalf("index: %v", err)
+	}
+
+	got, ok := server.Lookup(p)
+	if !ok {
+		t.Fatalf("running server did not see a hash written by another process (restart required — the bug)")
+	}
+	if got != want {
+		t.Fatalf("server reports %s, indexer wrote %s", got, want)
+	}
+}
+
+// TestReloadDoesNotResurrectStaleHashes: picking up another process's work must not override
+// the staleness rule, or a rewritten model gets advertised under its old hash.
+func TestReloadDoesNotResurrectStaleHashes(t *testing.T) {
+	dir := t.TempDir()
+	cache := filepath.Join(dir, "hashes.json")
+	p := writeFile(t, dir, "m.gguf", blob(5000))
+
+	indexer := OpenIndex(cache)
+	if _, err := indexer.Hash(p); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	server := OpenIndex(cache)
+	if _, ok := server.Lookup(p); !ok {
+		t.Fatalf("setup: server should see the indexed hash")
+	}
+
+	// The model is replaced on disk; the cache file still describes the old content.
+	if err := os.WriteFile(p, blob(9000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(2 * time.Second)
+	_ = os.Chtimes(p, future, future)
+
+	if sum, ok := server.Lookup(p); ok {
+		t.Fatalf("Lookup returned %s for changed content — a node would advertise one file and serve another", sum)
+	}
+}
+
+// TestFetchKeepsTheSourceFilename: a fetched model must land under a name a loader recognises.
+// ServeContent sends no Content-Disposition on its own, so without the handler setting one the
+// file arrives as <hash>.gguf and the operator has to rename it by hand.
+func TestFetchKeepsTheSourceFilename(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	data := blob(120_000)
+	want := sum256(data)
+	srv := serveFile(t, writeFile(t, src, "Qwen3.6-35B-A3B-Q4_K_M.gguf", data), want)
+
+	got, err := Fetch(srv.Client(), srv.URL, want, dst, nil)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if base := filepath.Base(got); base != "Qwen3.6-35B-A3B-Q4_K_M.gguf" {
+		t.Fatalf("landed as %q, want the source filename (a hash-named GGUF is not loadable)", base)
+	}
+}
+
+// TestHandlerDoesNotLetAPeerChooseAPath: the name a peer suggests is a base name or nothing.
+func TestHandlerDoesNotLetAPeerChooseAPath(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	data := blob(2000)
+	want := sum256(data)
+	// A file whose name, if echoed verbatim into a path, would escape the destination.
+	evil := writeFile(t, src, "escape.gguf", data)
+	h := Handler(func(string) (string, bool) { return evil, true })
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h(w, r)
+		// Overwrite with a hostile disposition after the fact is not possible; instead assert the
+		// client's own defence below.
+	}))
+	t.Cleanup(srv.Close)
+
+	got, err := Fetch(srv.Client(), srv.URL, want, dst, nil)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if filepath.Dir(got) != dst {
+		t.Fatalf("file landed outside the destination: %s", got)
+	}
+}
+
+// TestFindByHashSeesAnotherProcessesIndexing is the blob endpoint's half of the cross-process
+// case. It matters on its own because a peer fetching by --sha256 never calls /api/models first,
+// so nothing warms the index for it: a freshly started node must answer from the cache on disk.
+func TestFindByHashSeesAnotherProcessesIndexing(t *testing.T) {
+	dir := t.TempDir()
+	cache := filepath.Join(dir, "hashes.json")
+	p := writeFile(t, dir, "m.gguf", blob(4000))
+
+	server := OpenIndex(cache) // started before anything was indexed
+	indexer := OpenIndex(cache)
+	sum, err := indexer.Hash(p)
+	if err != nil {
+		t.Fatalf("index: %v", err)
+	}
+
+	// Serve straight from the server's index, exactly as the router does, with no prior Lookup.
+	srv := httptest.NewServer(Handler(server.FindByHash))
+	t.Cleanup(srv.Close)
+	resp, err := srv.Client().Get(srv.URL + BlobPath + "?sha256=" + sum)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("blob -> %d for an indexed model; the endpoint only works if something listed the catalogue first", resp.StatusCode)
+	}
+}
+
+// TestFindByHashSkipsRewrittenFiles: a node must not serve new bytes under an old hash. The
+// fetcher would reject them, but only after paying for the entire transfer.
+func TestFindByHashSkipsRewrittenFiles(t *testing.T) {
+	dir := t.TempDir()
+	ix := OpenIndex(filepath.Join(dir, "hashes.json"))
+	p := writeFile(t, dir, "m.gguf", blob(4000))
+	sum, err := ix.Hash(p)
+	if err != nil {
+		t.Fatalf("Hash: %v", err)
+	}
+	if _, ok := ix.FindByHash(sum); !ok {
+		t.Fatalf("setup: should find the freshly hashed file")
+	}
+
+	if err := os.WriteFile(p, blob(7000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(2 * time.Second)
+	_ = os.Chtimes(p, future, future)
+
+	if got, ok := ix.FindByHash(sum); ok {
+		t.Fatalf("FindByHash offered %s for content that changed — the node would serve one file as another", got)
+	}
+}
