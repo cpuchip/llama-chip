@@ -34,6 +34,7 @@ import (
 	"github.com/cpuchip/llama-chip/internal/rig"
 	"github.com/cpuchip/llama-chip/internal/router"
 	"github.com/cpuchip/llama-chip/internal/telemetry"
+	"github.com/cpuchip/llama-chip/internal/yield"
 )
 
 func main() {
@@ -209,6 +210,11 @@ func cmdServe(args []string) error {
 	tel := telemetry.New(r, logger) // the measured half of the slot contract: who holds each card, per-slot load
 	go tel.Run(fedCtx, 5*time.Second)
 	rt.SetTelemetry(tel)
+	// Yield-to-the-foreground: when a game takes a card, drain and unload our slots there so work
+	// fails over to the fleet, and reload when it exits. Manual override at POST /api/yield.
+	yc := yield.New(r, tel, fedPeers{f}, cfg.Slots, cfg.Yield, logger)
+	go yc.Run(fedCtx)
+	rt.SetYieldFunc(yc.SetManual)
 	srv := &http.Server{Handler: rt.Handler()}
 	go func() {
 		c := make(chan os.Signal, 1)
@@ -276,4 +282,20 @@ func cmdGPU() error {
 	}
 	w.Flush()
 	return nil
+}
+
+// fedPeers adapts *fed.Federation to yield.Fed: the controller pre-warms only online peers.
+type fedPeers struct{ f *fed.Federation }
+
+func (fp fedPeers) Peers() []yield.Peer {
+	if fp.f == nil {
+		return nil
+	}
+	var out []yield.Peer
+	for _, p := range fp.f.Peers() {
+		if p.Online {
+			out = append(out, yield.Peer{Name: p.Name, URL: p.URL})
+		}
+	}
+	return out
 }

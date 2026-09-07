@@ -36,8 +36,9 @@ var staticFS embed.FS
 type Router struct {
 	rig *rig.Rig
 	fed *fed.Federation // may be nil (standalone node)
-	log *log.Logger
-	tel *telemetry.Sampler // may be nil (tests); the slot contract's measured half
+	log     *log.Logger
+	tel     *telemetry.Sampler       // may be nil (tests); the slot contract's measured half
+	yieldFn func(gpu int, on bool)   // may be nil; wired to the yield controller's manual override
 }
 
 func New(r *rig.Rig, f *fed.Federation, logger *log.Logger) *Router {
@@ -47,6 +48,30 @@ func New(r *rig.Rig, f *fed.Federation, logger *log.Logger) *Router {
 // SetTelemetry attaches the sampler: /api/status and /api/fed/local then carry the measured
 // fields (ours/foreign VRAM, in-flight, cache hit rate) and every proxied request is observed.
 func (rt *Router) SetTelemetry(t *telemetry.Sampler) { rt.tel = t }
+
+// SetYieldFunc wires POST /api/yield to the yield controller's manual override.
+func (rt *Router) SetYieldFunc(f func(gpu int, on bool)) { rt.yieldFn = f }
+
+func (rt *Router) yield(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		writeErr(w, 405, "POST only")
+		return
+	}
+	if rt.yieldFn == nil {
+		writeErr(w, 400, "yield controller not configured (add a `yield` block to config)")
+		return
+	}
+	var body struct {
+		GPU int  `json:"gpu"`
+		On  bool `json:"on"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		writeErr(w, 400, "bad json: "+err.Error())
+		return
+	}
+	rt.yieldFn(body.GPU, body.On)
+	writeJSON(w, 202, map[string]any{"gpu": body.GPU, "yielding": body.On})
+}
 
 // statsWriter wraps the client's ResponseWriter to time the first byte, keep the tail of the
 // body (where usage lives) and record the status, without buffering the stream.
@@ -116,6 +141,7 @@ func (rt *Router) Handler() http.Handler {
 	mux.HandleFunc("/api/profiles", rt.profiles)
 	mux.HandleFunc("/api/profile", rt.applyProfile)
 	mux.HandleFunc("/api/ensure", rt.ensure)
+	mux.HandleFunc("/api/yield", rt.yield) // give a card up to a game (manual override of the yield controller)
 	mux.HandleFunc("/api/guess-context", rt.guessContext)
 	mux.HandleFunc("/api/live", rt.live)          // live per-slot activity (in-flight requests, tokens)
 	mux.HandleFunc("/api/pool", rt.pool)          // federated pool: every node's GPUs + models
