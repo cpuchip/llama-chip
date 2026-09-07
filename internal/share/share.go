@@ -60,6 +60,23 @@ type Index struct {
 	mu    sync.Mutex
 	path  string // where the cache is persisted
 	byKey map[string]Entry
+
+	// Identity of the cache file as we last read it. A miss re-checks these before answering
+	// "no": `llama-chip index` runs in a SEPARATE process, so without this a freshly indexed
+	// model stays invisible to the running server until it is restarted.
+	loadedMod  time.Time
+	loadedSize int64
+}
+
+// DefaultIndexPath is where a node keeps its hash cache: $XDG_CACHE_HOME/llama-chip/hashes.json,
+// else ~/.cache/llama-chip/hashes.json. It is a cache, not config — deleting it costs re-hashing
+// and nothing else.
+func DefaultIndexPath() string {
+	if d := os.Getenv("XDG_CACHE_HOME"); d != "" {
+		return filepath.Join(d, "llama-chip", "hashes.json")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".cache", "llama-chip", "hashes.json")
 }
 
 // OpenIndex loads (or starts) the cache at path. A missing or corrupt cache is not an error:
@@ -77,7 +94,40 @@ func OpenIndex(path string) *Index {
 	for _, e := range list {
 		ix.byKey[e.Path] = e
 	}
+	if fi, err := os.Stat(path); err == nil {
+		ix.loadedMod, ix.loadedSize = fi.ModTime(), fi.Size()
+	}
 	return ix
+}
+
+// reload re-reads the cache file when it has changed since we last read it, merging what it
+// holds into memory. Returns whether a re-read happened. On the common path this costs one stat.
+func (ix *Index) reload() bool {
+	fi, err := os.Stat(ix.path)
+	if err != nil {
+		return false
+	}
+	ix.mu.Lock()
+	unchanged := fi.ModTime().Equal(ix.loadedMod) && fi.Size() == ix.loadedSize
+	ix.mu.Unlock()
+	if unchanged {
+		return false
+	}
+	b, err := os.ReadFile(ix.path)
+	if err != nil {
+		return false
+	}
+	var list []Entry
+	if json.Unmarshal(b, &list) != nil {
+		return false // a half-written or damaged cache costs a miss, never a crash
+	}
+	ix.mu.Lock()
+	for _, e := range list {
+		ix.byKey[e.Path] = e
+	}
+	ix.loadedMod, ix.loadedSize = fi.ModTime(), fi.Size()
+	ix.mu.Unlock()
+	return true
 }
 
 // Lookup returns a cached hash if it still matches the file on disk.
@@ -87,10 +137,21 @@ func (ix *Index) Lookup(path string) (string, bool) {
 		return "", false
 	}
 	ix.mu.Lock()
-	defer ix.mu.Unlock()
 	e, ok := ix.byKey[path]
+	ix.mu.Unlock()
 	if !ok || e.stale(fi) {
-		return "", false
+		// A miss may only mean another process hashed it after we loaded. Re-read before
+		// answering "no", or an operator indexes a model and the server keeps saying it has
+		// no hash until someone restarts it.
+		if !ix.reload() {
+			return "", false
+		}
+		ix.mu.Lock()
+		e, ok = ix.byKey[path]
+		ix.mu.Unlock()
+		if !ok || e.stale(fi) {
+			return "", false
+		}
 	}
 	return e.SHA256, true
 }

@@ -276,3 +276,61 @@ func TestOpenIndexCorrupt(t *testing.T) {
 		t.Fatalf("a corrupt cache must not break hashing: %v", err)
 	}
 }
+
+// TestLookupSeesAnotherProcessesIndexing is the cross-process case that makes `llama-chip index`
+// usable against a RUNNING server: the server's Index was opened before the model was hashed, and
+// the hashing happened in a different process. Without the reload-on-miss the server keeps
+// answering "no hash" until someone restarts it, and the share feature looks broken while being
+// correctly configured.
+func TestLookupSeesAnotherProcessesIndexing(t *testing.T) {
+	dir := t.TempDir()
+	cache := filepath.Join(dir, "hashes.json")
+	p := writeFile(t, dir, "m.gguf", blob(5000))
+
+	server := OpenIndex(cache) // the long-lived process, opened while the cache is empty
+	if _, ok := server.Lookup(p); ok {
+		t.Fatalf("nothing is indexed yet; Lookup should miss")
+	}
+
+	indexer := OpenIndex(cache) // `llama-chip index`, a separate process
+	want, err := indexer.Hash(p)
+	if err != nil {
+		t.Fatalf("index: %v", err)
+	}
+
+	got, ok := server.Lookup(p)
+	if !ok {
+		t.Fatalf("running server did not see a hash written by another process (restart required — the bug)")
+	}
+	if got != want {
+		t.Fatalf("server reports %s, indexer wrote %s", got, want)
+	}
+}
+
+// TestReloadDoesNotResurrectStaleHashes: picking up another process's work must not override
+// the staleness rule, or a rewritten model gets advertised under its old hash.
+func TestReloadDoesNotResurrectStaleHashes(t *testing.T) {
+	dir := t.TempDir()
+	cache := filepath.Join(dir, "hashes.json")
+	p := writeFile(t, dir, "m.gguf", blob(5000))
+
+	indexer := OpenIndex(cache)
+	if _, err := indexer.Hash(p); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	server := OpenIndex(cache)
+	if _, ok := server.Lookup(p); !ok {
+		t.Fatalf("setup: server should see the indexed hash")
+	}
+
+	// The model is replaced on disk; the cache file still describes the old content.
+	if err := os.WriteFile(p, blob(9000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(2 * time.Second)
+	_ = os.Chtimes(p, future, future)
+
+	if sum, ok := server.Lookup(p); ok {
+		t.Fatalf("Lookup returned %s for changed content — a node would advertise one file and serve another", sum)
+	}
+}
