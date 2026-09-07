@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cpuchip/llama-chip/internal/config"
 	"github.com/cpuchip/llama-chip/internal/fed"
 	"github.com/cpuchip/llama-chip/internal/rig"
 )
@@ -550,5 +551,44 @@ func TestProxyNodeOverridePicksNamedPeer(t *testing.T) {
 	}
 	if beta.gotQuery != "" { // node param must be stripped before forwarding (no double-hop)
 		t.Fatalf("forwarded request should carry no query, got %q", beta.gotQuery)
+	}
+}
+
+// A request for an external slot's alias is proxied to the upstream root with the slot's
+// bearer, and the upstream's reply streams back unchanged.
+func TestProxyRoutesToExternalSlot(t *testing.T) {
+	up := newFakeBackend("qwen3.8-27b")
+	up.wantTok = "secret-key"
+	defer up.close()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
+	mux.Handle("/", up.srv.Config.Handler)
+	root := httptest.NewServer(mux)
+	defer root.Close()
+
+	r := rig.NewEmptyForTest(log.New(io.Discard, "", 0))
+	if err := r.Load(config.Slot{Alias: "qwen3.8-27b", External: root.URL, GPUs: []int{0}, APIKey: "secret-key"}); err != nil {
+		t.Fatal(err)
+	}
+	f := fed.New(fed.Config{NodeName: "here"}, log.New(io.Discard, "", 0))
+	front := httptest.NewServer(New(r, f, log.New(io.Discard, "", 0)).Handler())
+	defer front.Close()
+
+	resp := chatReq(t, front.URL, "qwen3.8-27b")
+	defer resp.Body.Close()
+	var got map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 || got["served_by"] != "peer" {
+		t.Fatalf("status %d body %v", resp.StatusCode, got)
+	}
+	if up.gotAuth != "Bearer secret-key" || up.gotPath != "/v1/chat/completions" {
+		t.Fatalf("upstream saw auth %q path %q", up.gotAuth, up.gotPath)
+	}
+	resp2 := chatReq(t, front.URL, "not-served")
+	resp2.Body.Close()
+	if resp2.StatusCode != 404 {
+		t.Fatalf("unknown model: status %d want 404", resp2.StatusCode)
 	}
 }

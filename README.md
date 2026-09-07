@@ -108,6 +108,27 @@ substrate dials it as the `flexllama` provider — the name is kept so the subst
 3. The substrate (in its container) reaches the rig over `host.docker.internal:8090`, the same
    path its `ollama` embeddings provider already uses.
 
+## External slots — front a server you did not launch (vLLM, say)
+
+A slot can point at an OpenAI-compatible server that llama-chip does **not** start or stop: a vLLM
+container, an SGLang box, anything that speaks `/v1/*` and answers `GET /health`. The rig only
+polls its health and the router proxies to it, so it shows up in `/v1/models`, in profiles, in
+`/api/status` and in the federation roster exactly like a llama-server slot. The alias is required
+and must be the model name the upstream serves, because the request body is forwarded as it came.
+
+```json
+{ "alias": "qwen3.8-27b", "external": "http://127.0.0.1:18020", "api_key_env": "QWEN_PROD_KEY", "gpus": [0] }
+```
+
+- `external` is the server **root** (no `/v1`); the router appends the request path.
+- `api_key_env` names an environment variable holding the upstream's bearer (`api_key` is the
+  inline alternative; the env var wins when both are set). It is sent as `Authorization` on every
+  proxied request and on the health poll.
+- `gpus` is declarative here: it tells `ensure` which cards the upstream occupies so an overlapping
+  load evicts it from the roster (it does not stop the upstream), and it tells the UI where it lives.
+- There is no restart: if the upstream goes away the slot reads `crashed` with the reason until it
+  comes back, and `unload` only stops the poller.
+
 ## Federation — pool GPUs across machines
 
 llama-chip can pool the GPUs of several machines behind one OpenAI endpoint. Each node serves

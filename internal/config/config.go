@@ -27,6 +27,14 @@ type Slot struct {
 	MMProj    string   `json:"mmproj,omitempty"`     // explicit multimodal projector (vision/audio) path; "" = auto-detect the co-located mmproj-*.gguf
 	NoMMProj  bool     `json:"no_mmproj,omitempty"`  // suppress mmproj auto-detect (load text-only even if a projector is present)
 	ExtraArgs []string `json:"extra_args,omitempty"`
+
+	// External slot: an OpenAI-compatible server this rig does NOT launch (a vLLM container, say).
+	// The rig only health-checks it (GET <external>/health) and the router proxies to it, so it shows
+	// up in /v1/models, in profiles and in the federation roster like any other slot. Alias is
+	// required and must be the model name the upstream serves (the request body is forwarded as-is).
+	External  string `json:"external,omitempty"`    // base URL of the server root, e.g. http://127.0.0.1:18020 (no /v1)
+	APIKey    string `json:"api_key,omitempty"`     // bearer the upstream requires; sent as Authorization
+	APIKeyEnv string `json:"api_key_env,omitempty"` // env var holding that bearer (wins over api_key when set)
 }
 
 // Name is the handle clients address this slot by.
@@ -155,7 +163,11 @@ func (c *Config) applyDefaults() {
 func (c *Config) validate() error {
 	names := map[string]bool{}
 	for _, s := range c.Slots {
-		if s.Model == "" {
+		if s.External != "" {
+			if s.Alias == "" {
+				return fmt.Errorf("external slot %q needs an alias (the model name the upstream serves)", s.External)
+			}
+		} else if s.Model == "" {
 			return fmt.Errorf("a slot has no model")
 		}
 		// An empty gpus ([] or omitted) is intentional: a CPU-only slot (CUDA_VISIBLE_DEVICES="").

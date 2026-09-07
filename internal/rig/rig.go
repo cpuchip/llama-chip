@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -39,6 +40,9 @@ type Instance struct {
 	Model   models.Model
 	Backend backends.Backend
 	Port    int
+	// External is set for a slot the rig does not launch: the upstream's root URL. The router
+	// proxies there (with the slot's bearer) and the supervisor only polls its /health.
+	External *url.URL
 
 	mu       sync.Mutex
 	state    State
@@ -68,6 +72,7 @@ type Status struct {
 	Restarts int     `json:"restarts"`
 	LastErr  string  `json:"last_err,omitempty"`
 	SizeGB   float64 `json:"size_gb"`
+	External string  `json:"external,omitempty"` // the upstream root URL for a slot the rig does not launch
 }
 
 func (in *Instance) snapshot() Status {
@@ -77,11 +82,15 @@ func (in *Instance) snapshot() Status {
 	if par < 1 {
 		par = 1
 	}
-	return Status{
+	st := Status{
 		Name: in.Slot.Name(), Model: in.Model.ID, GPUs: in.Slot.GPUs, Port: in.Port,
 		Ctx: in.Slot.CtxSize, Parallel: par, State: in.state, Restarts: in.restarts, LastErr: in.lastErr,
 		SizeGB: float64(in.Model.Bytes) / (1 << 30),
 	}
+	if in.External != nil {
+		st.External = in.External.String()
+	}
+	return st
 }
 
 func (in *Instance) set(s State, errMsg string) {
@@ -108,6 +117,9 @@ type Rig struct {
 // An empty GPUs ([] or omitted) is a CPU-only slot: CUDA_VISIBLE_DEVICES="" hides every card and
 // the backend runs on CPU (the mode the GPU-less NOCIX node uses to keep the federation alive).
 func (r *Rig) Load(s config.Slot) error {
+	if s.External != "" {
+		return r.loadExternal(s)
+	}
 	if s.Model == "" {
 		return fmt.Errorf("load needs a model")
 	}
@@ -282,6 +294,12 @@ func New(cfg *config.Config, logger *log.Logger) (*Rig, error) {
 	logger.Printf("backend: %s %s (%s)", be.Variant, be.Version, be.Server)
 	r := &Rig{cfg: cfg, backend: be, basePort: cfg.BasePort, byName: map[string]*Instance{}, log: logger}
 	for _, s := range cfg.Slots {
+		if s.External != "" {
+			if _, err := r.addExternal(s, Stopped); err != nil {
+				return nil, fmt.Errorf("slot %q: %w", s.Name(), err)
+			}
+			continue
+		}
 		m, ok := models.Find(s.Model)
 		if !ok {
 			return nil, fmt.Errorf("slot %q: no single model matches %q (run `llama-chip models`)", s.Name(), s.Model)
@@ -333,6 +351,10 @@ func resolveBackend(spec string) (backends.Backend, error) {
 // Start launches every slot and begins supervising.
 func (r *Rig) Start() {
 	for _, in := range r.instances {
+		if in.External != nil {
+			go r.superviseExternal(in)
+			continue
+		}
 		go r.supervise(in)
 	}
 }
@@ -584,4 +606,106 @@ func (in *Instance) Tail() []string {
 	out := make([]string, len(in.tail.lines))
 	copy(out, in.tail.lines)
 	return out
+}
+
+// ---- external slots: an OpenAI-compatible server the rig does not launch (a vLLM container, say) ----
+
+// addExternal registers an external slot without starting anything. Alias is the model name the
+// upstream serves and is required (there is no GGUF to name it after).
+func (r *Rig) addExternal(s config.Slot, st State) (*Instance, error) {
+	if s.Alias == "" {
+		return nil, fmt.Errorf("external slot needs an alias (the model name the upstream serves)")
+	}
+	u, err := url.Parse(strings.TrimRight(s.External, "/"))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return nil, fmt.Errorf("external %q is not a URL like http://127.0.0.1:18020", s.External)
+	}
+	port, _ := strconv.Atoi(u.Port())
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := strings.ToLower(s.Name())
+	if _, exists := r.byName[key]; exists {
+		return nil, fmt.Errorf("slot %q already loaded", s.Name())
+	}
+	in := &Instance{Slot: s, Model: models.Model{ID: s.Alias, Name: s.Alias}, External: u, Port: port, state: st, tail: newRing(8)}
+	r.instances = append(r.instances, in)
+	r.byName[key] = in
+	return in, nil
+}
+
+// loadExternal is Load for an external slot: register it and start the health poller.
+func (r *Rig) loadExternal(s config.Slot) error {
+	in, err := r.addExternal(s, Starting)
+	if err != nil {
+		return err
+	}
+	r.log.Printf("[%s] external upstream %s (not launched here; health-polled)", s.Name(), in.External)
+	go r.superviseExternal(in)
+	return nil
+}
+
+// Bearer is the Authorization token the router sends to an external upstream: the env var named
+// by api_key_env when set, else api_key. Empty for a slot the rig launches itself.
+func (in *Instance) Bearer() string {
+	if in.Slot.APIKeyEnv != "" {
+		if v := os.Getenv(in.Slot.APIKeyEnv); v != "" {
+			return v
+		}
+	}
+	return in.Slot.APIKey
+}
+
+// superviseExternal polls the upstream's /health every few seconds and mirrors it into the slot
+// state: 200 = healthy, anything else = crashed (with the reason), until the slot is unloaded.
+// There is nothing to restart: the server belongs to whoever launched it.
+func (r *Rig) superviseExternal(in *Instance) {
+	cl := &http.Client{Timeout: 3 * time.Second}
+	target := in.External.String() + "/health"
+	last := State("")
+	for {
+		if in.isStopping() {
+			return
+		}
+		req, _ := http.NewRequest(http.MethodGet, target, nil)
+		if b := in.Bearer(); b != "" {
+			req.Header.Set("Authorization", "Bearer "+b)
+		}
+		resp, err := cl.Do(req)
+		var st State
+		var why string
+		if err != nil {
+			st, why = Crashed, "upstream unreachable: "+err.Error()
+		} else {
+			resp.Body.Close()
+			if resp.StatusCode == 200 {
+				st = Healthy
+			} else {
+				st, why = Crashed, fmt.Sprintf("upstream /health returned %d", resp.StatusCode)
+			}
+		}
+		if st != last {
+			in.set(st, why)
+			if st == Healthy {
+				r.log.Printf("[%s] external upstream healthy (%s)", in.Slot.Name(), in.External)
+			} else {
+				r.log.Printf("[%s] external upstream not ready: %s", in.Slot.Name(), why)
+			}
+			last = st
+		}
+		for i := 0; i < 50; i++ { // 5 s between polls, but leave promptly on unload
+			if in.isStopping() {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+}
+
+// NewEmptyForTest builds a rig with no backend and no slots, for tests that only need external
+// slots (nothing is ever launched).
+func NewEmptyForTest(logger *log.Logger) *Rig {
+	if logger == nil {
+		logger = log.New(io.Discard, "", 0)
+	}
+	return &Rig{byName: map[string]*Instance{}, log: logger}
 }

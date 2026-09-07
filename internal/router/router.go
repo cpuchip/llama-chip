@@ -207,6 +207,11 @@ func (rt *Router) live(w http.ResponseWriter, _ *http.Request) {
 		if s.Parallel > 0 {
 			m.CtxPerSlot = s.Ctx / s.Parallel
 		}
+		if s.External != "" { // not a llama-server: no /slots to poll
+			m.Err = "external upstream: " + s.External
+			out = append(out, m)
+			continue
+		}
 		resp, err := cl.Get(fmt.Sprintf("http://127.0.0.1:%d/slots", s.Port))
 		if err != nil {
 			m.Err = "slots unavailable"
@@ -534,8 +539,14 @@ func (rt *Router) proxyByModel(w http.ResponseWriter, req *http.Request) {
 		bearer = rt.peerBearer(pin)
 		stripQueryParam(req, "node")
 	} else if in, ok := rt.rig.Resolve(probe.Model); ok {
-		target, _ = url.Parse(fmt.Sprintf("http://127.0.0.1:%d", in.Port))
-		label = fmt.Sprintf("local slot %q (:%d)", in.Slot.Name(), in.Port)
+		if in.External != nil { // a server this rig does not launch: proxy to its root, with its bearer
+			target = in.External
+			label = fmt.Sprintf("external slot %q (%s)", in.Slot.Name(), in.External)
+			bearer = in.Bearer()
+		} else {
+			target, _ = url.Parse(fmt.Sprintf("http://127.0.0.1:%d", in.Port))
+			label = fmt.Sprintf("local slot %q (:%d)", in.Slot.Name(), in.Port)
+		}
 	} else if route, ok := rt.fed.Resolve(probe.Model); ok {
 		target, _ = url.Parse(route.PeerURL)
 		label = fmt.Sprintf("peer %q (%s)", route.PeerName, route.PeerURL)
