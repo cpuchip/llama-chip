@@ -25,6 +25,7 @@ import (
 	"github.com/cpuchip/llama-chip/internal/gpu"
 	"github.com/cpuchip/llama-chip/internal/models"
 	"github.com/cpuchip/llama-chip/internal/rig"
+	"github.com/cpuchip/llama-chip/internal/share"
 )
 
 //go:embed static/*
@@ -33,10 +34,16 @@ var staticFS embed.FS
 // Router serves the OpenAI API + a small management API over a Rig. When fed is non-nil it
 // also federates: requests for a model not served locally route to a peer that serves it.
 type Router struct {
-	rig *rig.Rig
-	fed *fed.Federation // may be nil (standalone node)
-	log *log.Logger
+	rig   *rig.Rig
+	fed   *fed.Federation // may be nil (standalone node)
+	log   *log.Logger
+	share *share.Index // hash cache for peer-to-peer model sharing; may be nil
 }
+
+// WithShare attaches the sha256 index that backs /api/models/blob and the sha256 field on
+// /api/models. Nil-safe: a node without one simply does not advertise hashes and answers 404
+// on the blob endpoint.
+func (rt *Router) WithShare(ix *share.Index) *Router { rt.share = ix; return rt }
 
 func New(r *rig.Rig, f *fed.Federation, logger *log.Logger) *Router {
 	return &Router{rig: r, fed: f, log: logger}
@@ -61,6 +68,9 @@ func (rt *Router) Handler() http.Handler {
 	mux.HandleFunc("/api/status", rt.status)
 	mux.HandleFunc("/api/gpu", rt.gpuStatus)
 	mux.HandleFunc("/api/models", rt.availableModels)
+	// Peer-to-peer model sharing (never through the hub): a node serves its own GGUFs by
+	// content hash, with HTTP ranges so a fetch resumes.
+	mux.HandleFunc(share.BlobPath, rt.modelBlob)
 	mux.HandleFunc("/api/backends", rt.availableBackends)
 	mux.HandleFunc("/api/load", rt.load)
 	mux.HandleFunc("/api/unload", rt.unload)
@@ -378,7 +388,33 @@ func (rt *Router) availableModels(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, 200, map[string]any{"models": []any{}, "error": err.Error()})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"models": ms})
+	// Attach sha256 where it is already known. Deliberately Lookup and not Hash: hashing a
+	// library of multi-gigabyte GGUFs on a list request would stall the endpoint for minutes.
+	// A peer that wants a hash we have not computed asks for it (or waits for the indexer).
+	type withHash struct {
+		models.Model
+		SHA256 string `json:"sha256,omitempty"`
+	}
+	out := make([]withHash, 0, len(ms))
+	for _, m := range ms {
+		e := withHash{Model: m}
+		if rt.share != nil {
+			if h, ok := rt.share.Lookup(m.Path); ok {
+				e.SHA256 = h
+			}
+		}
+		out = append(out, e)
+	}
+	writeJSON(w, 200, map[string]any{"models": out})
+}
+
+// modelBlob serves this node's own GGUFs by content hash, for peer-to-peer fetch.
+func (rt *Router) modelBlob(w http.ResponseWriter, r *http.Request) {
+	if rt.share == nil {
+		http.Error(w, "model sharing not enabled on this node", http.StatusNotFound)
+		return
+	}
+	share.Handler(rt.share.FindByHash)(w, r)
 }
 
 // availableBackends lists the llama.cpp builds (for the UI dropdown).
