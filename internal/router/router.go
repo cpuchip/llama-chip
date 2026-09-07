@@ -41,6 +41,7 @@ type Router struct {
 	tel     *telemetry.Sampler     // may be nil (tests); the slot contract's measured half
 	yieldFn func(gpu int, on bool) // may be nil; wired to the yield controller's manual override
 	share   *share.Index           // hash cache for peer-to-peer model sharing; may be nil
+	aff     *affinity              // prefix-affinity map: keep a conversation on the node holding its cache
 }
 
 // WithShare attaches the sha256 index that backs /api/models/blob and the sha256 field on
@@ -49,7 +50,7 @@ type Router struct {
 func (rt *Router) WithShare(ix *share.Index) *Router { rt.share = ix; return rt }
 
 func New(r *rig.Rig, f *fed.Federation, logger *log.Logger) *Router {
-	return &Router{rig: r, fed: f, log: logger}
+	return &Router{rig: r, fed: f, log: logger, aff: newAffinity()}
 }
 
 // SetTelemetry attaches the sampler: /api/status and /api/fed/local then carry the measured
@@ -665,23 +666,16 @@ func (rt *Router) proxyByModel(w http.ResponseWriter, req *http.Request) {
 		label = fmt.Sprintf("node %q (%s)", pin, base)
 		bearer = rt.peerBearer(pin)
 		stripQueryParam(req, "node")
-	} else if in, ok := rt.rig.Resolve(probe.Model); ok {
-		statSlot = in.Slot.Name()
-		if in.External != nil { // a server this rig does not launch: proxy to its root, with its bearer
-			target = in.External
-			label = fmt.Sprintf("external slot %q (%s)", in.Slot.Name(), in.External)
-			bearer = in.Bearer()
-		} else {
-			target, _ = url.Parse(fmt.Sprintf("http://127.0.0.1:%d", in.Port))
-			label = fmt.Sprintf("local slot %q (:%d)", in.Slot.Name(), in.Port)
-		}
-	} else if route, ok := rt.fed.Resolve(probe.Model); ok {
-		target, _ = url.Parse(route.PeerURL)
-		label = fmt.Sprintf("peer %q (%s)", route.PeerName, route.PeerURL)
-		bearer = rt.peerBearer(route.PeerName)
 	} else {
-		writeErr(w, 404, fmt.Sprintf("no local slot or reachable peer serves model %q (see /v1/models)", probe.Model))
-		return
+		// Fleet routing: prefix affinity keeps a conversation on the node holding its cache;
+		// otherwise the least-loaded node that serves the model wins, local-first on a tie. A
+		// yielded card's slot is not a candidate, so a game hand-off fails over here.
+		var picked bool
+		target, label, bearer, statSlot, picked = rt.pickTarget(probe.Model, body, req.Header.Get("X-Session"))
+		if !picked {
+			writeErr(w, 404, fmt.Sprintf("no local slot or reachable peer serves model %q (see /v1/models)", probe.Model))
+			return
+		}
 	}
 
 	// Anthropic path only: fold mid-conversation system turns so a strict chat
