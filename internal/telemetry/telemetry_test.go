@@ -38,6 +38,23 @@ func TestComputeOursForeign(t *testing.T) {
 	}
 }
 
+func TestExternalCardUnknownUntilBaseline(t *testing.T) {
+	// A card carrying an external slot with no baseline yet must report foreign 0 (unknown),
+	// not the whole card as foreign — the startup race that tripped a spurious yield on card 0.
+	gpus := []gpu.GPU{{Index: 0, UUID: "GPU-a", MemUsed: 23664, MemTotal: 24564}}
+	statuses := []rig.Status{{Name: "vllm", Kind: "external", Loaded: true, GPUs: []int{0}}} // BaselineMiB nil
+	v := compute(gpus, nil, statuses, nil)[0]
+	if v.ForeignMiB != 0 || v.OursMiB != 23664 {
+		t.Fatalf("pre-baseline external card should read foreign 0 / ours all: %+v", v)
+	}
+	// Once the baseline is captured, attribution is normal again.
+	statuses[0].BaselineMiB = map[int]int{0: 23600}
+	v = compute(gpus, nil, statuses, nil)[0]
+	if v.OursMiB != 23600 || v.ForeignMiB != 64 {
+		t.Fatalf("post-baseline attribution wrong: %+v", v)
+	}
+}
+
 func TestStatsView(t *testing.T) {
 	s := NewStats()
 	s.Observe("x", Obs{TTFT: 100 * time.Millisecond, Dur: 1100 * time.Millisecond, PromptTok: 1000, ComplTok: 100, CachedTok: 800, Status: 200})

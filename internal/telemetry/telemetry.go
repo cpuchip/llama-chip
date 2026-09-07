@@ -204,8 +204,23 @@ func compute(gpus []gpu.GPU, procs []gpu.ProcUsage, statuses []rig.Status, yield
 			oursMiB[p.GPUIndex] += p.MiB
 		}
 	}
+	// External slots: their VRAM is the container's, which we cannot attribute by PID. Until the
+	// baseline is captured (the upstream's first healthy poll), we do not know how much of the
+	// card is the container vs a real hog, so mark the card unknown and report foreign 0 there.
+	// This closes a startup race where a card carrying a not-yet-baselined external slot briefly
+	// looks fully foreign and trips a spurious yield.
+	unknownCard := map[int]bool{}
 	for _, st := range statuses {
-		if st.Kind == "external" && st.Loaded {
+		if st.Kind != "external" {
+			continue
+		}
+		if len(st.BaselineMiB) == 0 {
+			for _, g := range st.GPUs {
+				unknownCard[g] = true
+			}
+			continue
+		}
+		if st.Loaded {
 			for idx, base := range st.BaselineMiB {
 				oursMiB[idx] += base
 			}
@@ -222,6 +237,11 @@ func compute(gpus []gpu.GPU, procs []gpu.ProcUsage, statuses []rig.Status, yield
 			v.MemFree = v.MemTotal - v.MemUsed
 		}
 		if v.OursMiB > v.MemUsed {
+			v.OursMiB = v.MemUsed
+		}
+		if unknownCard[g.Index] {
+			// A not-yet-baselined external slot lives here: attribute the whole card to ours so
+			// foreign reads 0 (unknown), rather than mistaking the container for a hog.
 			v.OursMiB = v.MemUsed
 		}
 		v.ForeignMiB = v.MemUsed - v.OursMiB
