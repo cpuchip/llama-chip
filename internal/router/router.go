@@ -702,6 +702,18 @@ func (rt *Router) proxyByModel(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
+	// A streamed completion without stream_options gets include_usage, so the final chunk carries
+	// usage and the request line below can report tokens (the phone's chats logged prompt=0 without it).
+	if req.URL.Path == "/v1/chat/completions" || req.URL.Path == "/v1/completions" {
+		if raw, ok := doc.get("stream"); ok && bytes.Equal(bytes.TrimSpace(raw), []byte("true")) {
+			if _, has := doc.get("stream_options"); !has {
+				if b, ok := injectField(body, `"stream_options":{"include_usage":true},`); ok {
+					body = b
+				}
+			}
+		}
+	}
+
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.FlushInterval = -1 // flush immediately — keep SSE streaming responsive
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, e error) {
@@ -754,13 +766,18 @@ func (rt *Router) logf(format string, args ...any) {
 // injectMaxTokens adds "max_tokens": n to a JSON object body that has none. The body has already
 // been parsed as a single object, so inserting right after its opening brace is a valid edit.
 func injectMaxTokens(body []byte, n int) ([]byte, bool) {
+	return injectField(body, fmt.Sprintf(`"max_tokens":%d,`, n))
+}
+
+// injectField inserts one `"key":value,` fragment right after the object's opening brace.
+func injectField(body []byte, fragment string) ([]byte, bool) {
 	i := bytes.IndexByte(body, '{')
 	if i < 0 {
 		return body, false
 	}
-	out := make([]byte, 0, len(body)+24)
+	out := make([]byte, 0, len(body)+len(fragment))
 	out = append(out, body[:i+1]...)
-	out = append(out, []byte(fmt.Sprintf(`"max_tokens":%d,`, n))...)
+	out = append(out, fragment...)
 	out = append(out, body[i+1:]...)
 	return out, true
 }
