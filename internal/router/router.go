@@ -717,6 +717,8 @@ func (rt *Router) proxyByModel(w http.ResponseWriter, req *http.Request) {
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.FlushInterval = -1 // flush immediately — keep SSE streaming responsive
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, e error) {
+		// The one failure the request line below cannot explain by itself: say what broke on the hop.
+		rt.logf("router: %s model=%s -> %s PROXY ERROR: %v (body=%dB)", req.URL.Path, probe.Model, label, e, len(body))
 		writeErr(w, 502, fmt.Sprintf("%s error: %v", label, e))
 	}
 	req.Body = io.NopCloser(bytes.NewReader(body))
