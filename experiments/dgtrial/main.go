@@ -65,8 +65,8 @@ type result struct {
 }
 
 func main() {
-	serverPath := flag.String("server", `C:\Users\cpuch\.unsloth\llama.cpp\build\bin\Release\llama-diffusion-gemma-visual-server.exe`, "visual-server binary")
-	modelPath := flag.String("model", `C:\Users\cpuch\.unsloth\models\diffusiongemma-26B-A4B-it-GGUF\diffusiongemma-26B-A4B-it-Q4_K_M.gguf`, "DiffusionGemma GGUF")
+	serverPath := flag.String("server", filepath.Join(os.Getenv("USERPROFILE"), ".unsloth", "llama.cpp", "build", "bin", "Release", "llama-diffusion-gemma-visual-server.exe"), "visual-server binary")
+	modelPath := flag.String("model", filepath.Join(os.Getenv("USERPROFILE"), ".unsloth", "models", "diffusiongemma-26B-A4B-it-GGUF", "diffusiongemma-26B-A4B-it-Q4_K_M.gguf"), "DiffusionGemma GGUF")
 	fixDir := flag.String("fixtures", "fixtures", "dir of fixture JSON files")
 	outPath := flag.String("out", "results.md", "results markdown")
 	ngl := flag.String("ngl", "99", "GPU layers (NGL env)")
