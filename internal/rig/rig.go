@@ -335,6 +335,14 @@ func (r *Rig) Ensure(s config.Slot) (string, string, error) {
 }
 
 // New resolves the backend + every slot's model and prepares (does not start) the rig.
+// DefaultMaxTokens is the config cap the router applies to capless completions (0 = none).
+func (r *Rig) DefaultMaxTokens() int {
+	if r == nil || r.cfg == nil {
+		return 0
+	}
+	return r.cfg.DefaultMaxTokens
+}
+
 func New(cfg *config.Config, logger *log.Logger) (*Rig, error) {
 	if logger == nil {
 		logger = log.New(os.Stderr, "", log.LstdFlags)

@@ -692,6 +692,16 @@ func (rt *Router) proxyByModel(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
+	// A capless completion gets the rig's default cap so a runaway can never run to the whole context.
+	capped := 0
+	if n := rt.defaultMaxTokens(); n > 0 && (req.URL.Path == "/v1/chat/completions" || req.URL.Path == "/v1/completions") {
+		if _, has := doc.get("max_tokens"); !has {
+			if b, ok := injectMaxTokens(body, n); ok {
+				body, capped = b, n
+			}
+		}
+	}
+
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.FlushInterval = -1 // flush immediately — keep SSE streaming responsive
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, e error) {
@@ -703,11 +713,9 @@ func (rt *Router) proxyByModel(w http.ResponseWriter, req *http.Request) {
 	if bearer != "" { // authenticate to the peer's federation endpoint (forwarded by the proxy)
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
-	if rt.tel == nil || statSlot == "" {
-		proxy.ServeHTTP(w, req)
-		return
-	}
-	// A local slot: observe the request for the slot contract (ttft, tok/s, cache hit rate).
+	// Every proxied request is observed (first byte, duration, status, usage from the tail) and
+	// logged as one line, local slot or peer, so "where did my chat go and what happened to it"
+	// has an answer in the node log.
 	t0 := time.Now()
 	sw := &statsWriter{ResponseWriter: w}
 	proxy.ServeHTTP(sw, req)
@@ -718,7 +726,43 @@ func (rt *Router) proxyByModel(w http.ResponseWriter, req *http.Request) {
 	if u, ok := telemetry.ParseUsageTail(sw.tail); ok {
 		obs.PromptTok, obs.ComplTok, obs.CachedTok = u.PromptTok, u.ComplTok, u.CachedTok
 	}
-	rt.tel.Stats().Observe(statSlot, obs)
+	rt.logf("router: %s model=%s -> %s status=%d ttft=%s dur=%s prompt=%d compl=%d cached=%d cap=%d body=%dB",
+		req.URL.Path, probe.Model, label, obs.Status, obs.TTFT.Round(time.Millisecond), obs.Dur.Round(time.Millisecond),
+		obs.PromptTok, obs.ComplTok, obs.CachedTok, capped, len(body))
+	if rt.tel != nil && statSlot != "" {
+		rt.tel.Stats().Observe(statSlot, obs)
+	}
+}
+
+// defaultMaxTokens is the rig's cap, or 0 for a router without a rig (tests, standalone doors).
+func (rt *Router) defaultMaxTokens() int {
+	if rt.rig == nil {
+		return 0
+	}
+	return rt.rig.DefaultMaxTokens()
+}
+
+// logf writes to the router's logger, or the standard one when none was given (tests).
+func (rt *Router) logf(format string, args ...any) {
+	if rt.log != nil {
+		rt.log.Printf(format, args...)
+		return
+	}
+	log.Printf(format, args...)
+}
+
+// injectMaxTokens adds "max_tokens": n to a JSON object body that has none. The body has already
+// been parsed as a single object, so inserting right after its opening brace is a valid edit.
+func injectMaxTokens(body []byte, n int) ([]byte, bool) {
+	i := bytes.IndexByte(body, '{')
+	if i < 0 {
+		return body, false
+	}
+	out := make([]byte, 0, len(body)+24)
+	out = append(out, body[:i+1]...)
+	out = append(out, []byte(fmt.Sprintf(`"max_tokens":%d,`, n))...)
+	out = append(out, body[i+1:]...)
+	return out, true
 }
 
 // listModels reports the models THIS endpoint can serve in OpenAI /v1/models shape — local

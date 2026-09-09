@@ -95,6 +95,11 @@ type Config struct {
 	// /api/profile call. Lets a restart land on the right models without "which button do I press".
 	DefaultProfile string `json:"default_profile,omitempty"`
 
+	// DefaultMaxTokens caps a completion when the caller sends no max_tokens (0 = leave it to the
+	// upstream). Born 2026-09-09: a phone chat with no cap ran a reasoning loop to the model's whole
+	// context, 3 min 20 s at 300 tok/s, and nothing on the wire said so.
+	DefaultMaxTokens int `json:"default_max_tokens,omitempty"`
+
 	// Federation is optional: list peer nodes to pool GPUs across machines (see package fed).
 	Federation *Federation `json:"federation,omitempty"`
 
