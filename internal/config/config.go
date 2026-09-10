@@ -35,6 +35,55 @@ type Slot struct {
 	External  string `json:"external,omitempty"`    // base URL of the server root, e.g. http://127.0.0.1:18020 (no /v1)
 	APIKey    string `json:"api_key,omitempty"`     // bearer the upstream requires; sent as Authorization
 	APIKeyEnv string `json:"api_key_env,omitempty"` // env var holding that bearer (wins over api_key when set)
+
+	// Container slot: an OpenAI-compatible server the rig launches as a Docker container (a vLLM
+	// image, say) and then fronts exactly like an external slot. The lab panel builds these: the
+	// knobs are the container's environment, so a setting can be tried without editing a launcher.
+	// Alias is required (the model name the server inside serves); port is the HOST port the
+	// container's server is published on (loopback only).
+	Container *Container `json:"container,omitempty"`
+}
+
+// Container describes a server the rig runs with `docker run`. Everything the image needs is
+// declared here; nothing is read from the host besides the bearer named by the slot's
+// api_key_env, which is handed to the container as the environment variable KeyEnvIn without
+// ever appearing on the docker command line.
+type Container struct {
+	Image    string            `json:"image"`                 // e.g. an inference image tag
+	Cmd      string            `json:"cmd,omitempty"`         // command run inside the container (bash -c); "" = the image's default
+	Pre      string            `json:"pre,omitempty"`         // shell run before Cmd, inside the container: an experiment's one-line edit, a sed on a constant
+	Env      map[string]string `json:"env,omitempty"`         // the knobs (MAX_LEN, GPU_UTIL, ...)
+	Mounts   []string          `json:"mounts,omitempty"`      // docker -v entries: "host-path-or-volume:/container/path[:ro]"
+	Port     int               `json:"port,omitempty"`        // the server's port INSIDE the container (default 18020)
+	Extra    []string          `json:"extra_args,omitempty"`  // extra `docker run` flags (--ipc host, --shm-size 64m, ...)
+	KeyEnvIn string            `json:"key_env_in,omitempty"`  // container env var that receives the slot's bearer (default VLLM_API_KEY)
+	Health   string            `json:"health,omitempty"`      // health path on the server (default /health)
+	Served   string            `json:"served,omitempty"`      // the model name the server inside answers to; when it differs from the alias the router rewrites `model` on the way in, so two lab slots of the same image can coexist under different aliases
+}
+
+// Lab holds the defaults the lab panel starts from, so a config carries the image, the mounts
+// and the key once and the UI only asks for the knobs. Optional; without it the panel is hidden.
+type Lab struct {
+	Image     string            `json:"image"`
+	Mounts    []string          `json:"mounts,omitempty"`
+	Extra     []string          `json:"extra_args,omitempty"`
+	APIKeyEnv string            `json:"api_key_env,omitempty"` // host env var holding the bearer the server expects
+	KeyEnvIn  string            `json:"key_env_in,omitempty"`
+	Port      int               `json:"port,omitempty"`     // the server's port inside the container
+	Served    string            `json:"served,omitempty"`   // the model name the image's server answers to (see Container.Served)
+	BasePort  int               `json:"base_port,omitempty"` // first host port the lab publishes on (default 18100)
+	Env       map[string]string `json:"env,omitempty"`      // env every lab launch gets (VLLM_NO_USAGE_STATS=1, ...)
+	Presets   []LabPreset       `json:"presets,omitempty"`  // named starting points (cmd + env) shown in the panel
+}
+
+// LabPreset is one named starting point in the lab panel: a command inside the image plus the
+// environment it wants. The panel lets the knobs be edited before launch.
+type LabPreset struct {
+	Name string            `json:"name"`
+	Cmd  string            `json:"cmd"`
+	Env  map[string]string `json:"env,omitempty"`
+	Pre  string            `json:"pre,omitempty"`  // shell run inside the container before cmd (an experiment's edit)
+	Note string            `json:"note,omitempty"` // what this preset is for, shown beside the launch button
 }
 
 // Name is the handle clients address this slot by.
@@ -105,6 +154,10 @@ type Config struct {
 
 	// Yield is optional: give a card up to a game and move the work to the fleet (see Yield).
 	Yield *Yield `json:"yield,omitempty"`
+
+	// Lab is optional: the defaults behind the lab panel, which launches container slots with
+	// editable knobs so a server setting can be tried and felt before it becomes a launcher's default.
+	Lab *Lab `json:"lab,omitempty"`
 }
 
 // FedConfig converts the JSON federation block into a fed.Config. Returns the zero value
@@ -179,6 +232,46 @@ func (y *Yield) Restore() time.Duration {
 	return time.Duration(y.RestoreSec) * time.Second
 }
 
+// Validate checks what a container slot must carry before anything is launched.
+func (ct *Container) Validate(s Slot) error {
+	if s.Alias == "" {
+		return fmt.Errorf("container slot needs an alias (the model name the server inside serves)")
+	}
+	if strings.TrimSpace(ct.Image) == "" {
+		return fmt.Errorf("container slot %q needs an image", s.Alias)
+	}
+	for _, m := range ct.Mounts {
+		if !strings.Contains(m, ":/") {
+			return fmt.Errorf("container slot %q: mount %q is not host:/container[:ro]", s.Alias, m)
+		}
+	}
+	return nil
+}
+
+// ContainerPort is the server's port inside the container (18020 unless set).
+func (ct *Container) ContainerPort() int {
+	if ct.Port > 0 {
+		return ct.Port
+	}
+	return 18020
+}
+
+// KeyVar is the container environment variable that receives the slot's bearer.
+func (ct *Container) KeyVar() string {
+	if ct.KeyEnvIn != "" {
+		return ct.KeyEnvIn
+	}
+	return "VLLM_API_KEY"
+}
+
+// HealthPath is the path polled for readiness on the server inside the container.
+func (ct *Container) HealthPath() string {
+	if ct.Health != "" {
+		return ct.Health
+	}
+	return "/health"
+}
+
 // Load reads a config file and fills defaults.
 func Load(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
@@ -223,7 +316,11 @@ func (c *Config) applyDefaults() {
 func (c *Config) validate() error {
 	names := map[string]bool{}
 	for _, s := range c.Slots {
-		if s.External != "" {
+		if s.Container != nil {
+			if err := s.Container.Validate(s); err != nil {
+				return err
+			}
+		} else if s.External != "" {
 			if s.Alias == "" {
 				return fmt.Errorf("external slot %q needs an alias (the model name the upstream serves)", s.External)
 			}

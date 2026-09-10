@@ -108,5 +108,48 @@
     "token": "",
     "poll_interval_sec": 5,
     "peers": []
+  },
+  "lab": {
+    "image": "your-inference-image:tag",
+    "mounts": [
+      "D:\\models:/app/models",
+      "cache-volume:/cache"
+    ],
+    "extra_args": [
+      "--ipc",
+      "host",
+      "--shm-size",
+      "64m"
+    ],
+    "api_key_env": "MY_SERVER_KEY",
+    "key_env_in": "VLLM_API_KEY",
+    "port": 18020,
+    "base_port": 18100,
+    "env": {
+      "HOME": "/cache",
+      "PORT": "18020"
+    },
+    "presets": [
+      {
+        "name": "baseline",
+        "cmd": "bash docker/entrypoint.sh single",
+        "env": {
+          "MAX_LEN": "100000",
+          "GPU_UTIL": "0.88"
+        },
+        "note": "what production runs"
+      },
+      {
+        "name": "an experiment",
+        "cmd": "bash docker/entrypoint.sh single",
+        "pre": "sed -i 's/^SOME_CONSTANT = 16$/SOME_CONSTANT = 32/' /app/some/file.py",
+        "env": {
+          "MAX_LEN": "100000",
+          "GPU_UTIL": "0.88"
+        },
+        "note": "the same, with one line changed"
+      }
+    ],
+    "served": "the-served-model-name"
   }
 }

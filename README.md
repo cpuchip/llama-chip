@@ -129,6 +129,17 @@ and must be the model name the upstream serves, because the request body is forw
 - There is no restart: if the upstream goes away the slot reads `crashed` with the reason until it
   comes back, and `unload` only stops the poller.
 
+## Container slots and the lab — launch a server with the knobs you want
+
+A slot can also be a server the rig **launches** as a Docker container and then fronts like an
+external slot: the knobs are the container's environment, the boot log streams into the UI, a
+boot that dies shows its own reason, and once `/health` answers the slot is a model in the chat
+test with tok/s on every reply. The **Lab** panel builds such slots from named presets in a `lab`
+config block (image, mounts, key variable, presets), so a launch-time setting can be tried and
+felt before it becomes a launcher's default. A launch through the API is accepted from this
+machine only, and what the container is given of the host comes from the config, never from the
+request. See [docs/lab.md](docs/lab.md).
+
 ## Federation — pool GPUs across machines
 
 llama-chip can pool the GPUs of several machines behind one OpenAI endpoint. Each node serves

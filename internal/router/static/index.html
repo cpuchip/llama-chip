@@ -27,6 +27,7 @@
   .s-crashed{ background:rgba(255,93,93,.15); color:var(--bad);} .s-stopped{ background:#222; color:var(--dim);}
   form { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; align-items:end; }
   label { display:block; font-size:12px; color:var(--dim); margin-bottom:4px; }
+  textarea { width:100%; background:#0c0e12; border:1px solid var(--line); color:var(--ink); border-radius:6px; padding:8px; font:12px/1.4 ui-monospace,Consolas,monospace; resize:vertical; }
   select,input { width:100%; background:#0c0e12; border:1px solid var(--line); color:var(--ink); border-radius:6px; padding:8px; }
   .gpubox { display:flex; gap:14px; align-items:center; padding-top:22px; }
   .gpubox label { display:flex; gap:6px; align-items:center; color:var(--ink); margin:0; }
@@ -165,6 +166,34 @@
     <p style="color:var(--dim);font-size:12px">Two GPUs checked = one model split across both. One = pinned to that card.</p>
   </section>
 
+  <section class="panel hide" id="labSec">
+    <h2>Lab <span style="color:var(--dim);font-weight:400;text-transform:none">— launch a server container with the knobs you want, watch it boot, then chat with it below</span></h2>
+    <form id="labform">
+      <div style="grid-column:span 2"><label>Preset</label><select id="labpreset"></select></div>
+      <div><label>Alias (the model name it serves)</label><input id="labalias" value="qwen-lab" autocomplete="off"></div>
+      <div class="gpubox">
+        <span style="color:var(--dim);font-size:12px">GPU</span>
+        <label><input type="radio" name="labgpu" value="0"> 0</label>
+        <label><input type="radio" name="labgpu" value="1" checked> 1</label>
+      </div>
+      <div><label>Host port</label><input id="labport" type="number" min="1024" step="1"></div>
+      <div style="grid-column:1/-1"><label>Command inside the image</label><input id="labcmd" autocomplete="off"></div>
+      <div style="grid-column:1/-1"><label>Knobs <span style="text-transform:none">(environment, one KEY=VALUE per line; a leading # skips a line)</span></label><textarea id="labenv" rows="9" spellcheck="false"></textarea></div>
+      <div style="grid-column:1/-1"><label>Before the command <span style="text-transform:none">(shell run inside the container first: an experiment's one-line edit)</span></label><input id="labpre" autocomplete="off" spellcheck="false"></div>
+      <div><button type="submit">Launch</button></div>
+      <div style="grid-column:span 3;color:var(--dim);font-size:12px;align-self:center" id="labnote"></div>
+    </form>
+    <div class="err" id="laberr"></div>
+    <div style="display:flex;gap:10px;align-items:center;margin-top:12px;flex-wrap:wrap">
+      <span style="color:var(--dim);font-size:12px">Boot log</span>
+      <select id="lablogslot" style="max-width:220px"></select>
+      <span id="lablogstate" class="pill s-stopped">none</span>
+      <label style="margin:0;display:flex;gap:6px;align-items:center;color:var(--dim)"><input type="checkbox" id="labfollow" checked> follow</label>
+      <button class="ghost" type="button" onclick="labStop()">stop &amp; remove</button>
+    </div>
+    <pre id="lablog" style="border:1px solid var(--line);border-radius:8px;padding:12px;height:280px;overflow:auto;background:#0c0e12;font-size:11.5px;line-height:1.35;margin:8px 0 0;white-space:pre-wrap;word-break:break-all;color:#cdd6e4"></pre>
+  </section>
+
   <section class="panel">
     <h2>Chat test <span style="color:var(--dim);font-weight:400;text-transform:none">— session-based, against a loaded model</span></h2>
     <div style="display:flex;gap:10px;margin-bottom:10px">
@@ -201,6 +230,7 @@ async function refreshSlots() {
   try {
     const r = await (await fetch('/api/status')).json();
     const rows = (r.slots||[]);
+    labSlots(rows);
     const live = new Set(rows.map(s=>s.name));
     Object.keys(startSince).forEach(n=>{ if(!live.has(n)) delete startSince[n]; });
     $('#slots').innerHTML = rows.length ? rows.map(s => {
@@ -410,7 +440,7 @@ async function guessCtx(){
 }
 // --- session-based chat test ---
 let chatSession = [];
-const escapeHtml = s => (s||'').replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const escapeHtml = s => (s||'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 // compact markdown -> HTML (split on code fences so blocks are never mangled)
 function renderMarkdown(src){
   const esc = t => (t||'').replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
@@ -661,7 +691,76 @@ $('#modelsearch').addEventListener('keydown', e => {
   if (e.key === 'Escape') { $('#modelsearch').value=''; renderModels(); }
 });
 
-loadModels(); loadProfiles(); refreshGPU(); refreshSlots(); refreshChatModels(); refreshLive(); refreshPool(); renderChat();
+// --- lab: container slots with editable knobs (shown only when the config has a lab block) ---
+let LAB = null;
+async function initLab() {
+  try { const r = await fetch('/api/lab'); if (!r.ok) return; LAB = await r.json(); } catch(e) { return; }
+  $('#labSec').classList.remove('hide');
+  const sel = $('#labpreset');
+  sel.innerHTML = (LAB.presets||[]).map((p,i)=>`<option value="${i}">${escapeHtml(p.name)}</option>`).join('');
+  sel.onchange = applyLabPreset;
+  $('#labport').value = LAB.base_port || 18100;
+  applyLabPreset();
+}
+function applyLabPreset() {
+  const p = (LAB.presets||[])[+$('#labpreset').value];
+  if (!p) return;
+  $('#labcmd').value = p.cmd || '';
+  const env = p.env || {};
+  $('#labenv').value = Object.keys(env).sort().map(k => k+'='+env[k]).join('\n');
+  $('#labpre').value = p.pre || '';
+  $('#labnote').textContent = p.note || '';
+}
+function labSlots(rows) {
+  const sel = $('#lablogslot'); if (!sel) return;
+  const names = rows.filter(s => s.kind === 'container').map(s => s.name);
+  const cur = sel.value;
+  const have = [...sel.options].map(o => o.value);
+  if (names.join('|') !== have.join('|')) {
+    sel.innerHTML = names.map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join('');
+    if (names.includes(cur)) sel.value = cur;
+  }
+  if (!names.length) { $('#lablogstate').className = 'pill s-stopped'; $('#lablogstate').textContent = 'none'; }
+}
+$('#labform').addEventListener('submit', async e => {
+  e.preventDefault(); $('#laberr').textContent = '';
+  const env = {};
+  $('#labenv').value.split('\n').forEach(l => {
+    l = l.trim(); if (!l || l.startsWith('#')) return;
+    const i = l.indexOf('='); if (i > 0) env[l.slice(0,i).trim()] = l.slice(i+1).trim();
+  });
+  const gpu = +document.querySelector('input[name=labgpu]:checked').value;
+  const body = {
+    alias: $('#labalias').value.trim(), gpus: [gpu], port: +$('#labport').value,
+    api_key_env: LAB.api_key_env || undefined,
+    container: { image: LAB.image, cmd: $('#labcmd').value, pre: $('#labpre').value,
+      env: Object.assign({}, LAB.env||{}, env), mounts: LAB.mounts||[], extra_args: LAB.extra_args||[],
+      port: LAB.port||undefined, key_env_in: LAB.key_env_in||undefined, served: LAB.served||undefined },
+  };
+  const res = await fetch('/api/load', {method:'POST', body: JSON.stringify(body)});
+  if (!res.ok) { const j = await res.json().catch(()=>({})); $('#laberr').innerHTML = '<span style="color:var(--bad)">'+escapeHtml((j.error&&j.error.message)||('launch failed: '+res.status))+'</span>'; return; }
+  $('#laberr').innerHTML = '<span style="color:var(--ok)">launching '+escapeHtml(body.alias)+' on GPU '+gpu+' (port '+body.port+')… the boot log follows below; chat with it once it is healthy</span>';
+  $('#labport').value = body.port + 1;
+  setTimeout(() => { refreshSlots().then(() => { $('#lablogslot').value = body.alias; refreshLabLog(); }); }, 800);
+});
+async function refreshLabLog() {
+  const name = $('#lablogslot').value; if (!name) return;
+  let j; try { const r = await fetch('/api/logs?name='+encodeURIComponent(name)); if (!r.ok) return; j = await r.json(); } catch(e) { return; }
+  $('#lablogstate').className = 'pill s-'+j.state; $('#lablogstate').textContent = j.state;
+  const pre = $('#lablog');
+  let text = (j.lines||[]).join('\n');
+  if (j.state === 'crashed' && j.last_err) text += '\n\n== '+j.last_err;
+  if (pre.textContent !== text) { pre.textContent = text; if ($('#labfollow').checked) pre.scrollTop = pre.scrollHeight; }
+}
+async function labStop() {
+  const name = $('#lablogslot').value; if (!name) return;
+  await fetch('/api/unload', {method:'POST', body: JSON.stringify({name})});
+  $('#laberr').innerHTML = '<span style="color:var(--dim)">stopped '+escapeHtml(name)+'</span>';
+  refreshSlots();
+}
+setInterval(() => { if (LAB && $('#lablogslot').value) refreshLabLog(); }, 2000);
+
+loadModels(); loadProfiles(); refreshGPU(); refreshSlots(); refreshChatModels(); refreshLive(); refreshPool(); renderChat(); initLab();
 </script>
 </body>
 </html>

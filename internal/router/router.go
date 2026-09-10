@@ -147,6 +147,8 @@ func (rt *Router) Handler() http.Handler {
 	mux.HandleFunc(share.BlobPath, rt.modelBlob)
 	mux.HandleFunc("/api/backends", rt.availableBackends)
 	mux.HandleFunc("/api/load", rt.load)
+	mux.HandleFunc("/api/logs", rt.logs) // a slot's recent output (a container's boot log)
+	mux.HandleFunc("/api/lab", rt.lab)   // the lab panel's defaults: image, mounts, presets
 	mux.HandleFunc("/api/unload", rt.unload)
 	mux.HandleFunc("/api/unload-all", rt.unloadAll)
 	mux.HandleFunc("/api/profiles", rt.profiles)
@@ -530,11 +532,50 @@ func (rt *Router) load(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 400, "bad slot json: "+err.Error())
 		return
 	}
+	if s.Container != nil {
+		// A container launch reaches `docker run`. Only the local browser may ask for one, and
+		// what the container is given of the host (image, mounts, docker flags, the key) comes
+		// from the config's lab block, never from the request.
+		if !isLoopback(req.RemoteAddr) {
+			writeErr(w, 403, "container slots can only be launched from this machine")
+			return
+		}
+		built, err := rt.rig.LabSlot(s)
+		if err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		s = built
+	}
 	if err := rt.rig.Load(s); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
 	writeJSON(w, 202, map[string]string{"status": "loading", "slot": s.Name()})
+}
+
+// logs returns a slot's recent output lines: for a container slot the boot log the rig tails,
+// for a llama-server its stderr tail. ?name=<slot>.
+func (rt *Router) logs(w http.ResponseWriter, req *http.Request) {
+	name := req.URL.Query().Get("name")
+	in, ok := rt.rig.Resolve(name)
+	if !ok {
+		writeErr(w, 404, "no slot "+name)
+		return
+	}
+	st := in.Snapshot()
+	writeJSON(w, 200, map[string]any{"name": st.Name, "state": st.State, "kind": st.Kind, "last_err": st.LastErr, "lines": in.Tail()})
+}
+
+// lab returns the lab block of the config (image, mounts, key variable, presets), which the
+// panel starts a container slot from. 404 when the config has no lab block (panel hidden).
+func (rt *Router) lab(w http.ResponseWriter, _ *http.Request) {
+	l := rt.rig.Lab()
+	if l == nil {
+		writeErr(w, 404, "no lab block in the config")
+		return
+	}
+	writeJSON(w, 200, l)
 }
 
 // unload removes a slot: {"name":"..."}.
@@ -676,6 +717,17 @@ func (rt *Router) proxyByModel(w http.ResponseWriter, req *http.Request) {
 			writeErr(w, 404, fmt.Sprintf("no local slot or reachable peer serves model %q (see /v1/models)", probe.Model))
 			return
 		}
+		// A container slot is addressed by its alias but the server inside answers to its own
+		// served name (a vLLM launcher hardcodes one): rewrite `model` so the upstream accepts it.
+		if statSlot != "" {
+			if in, ok := rt.rig.Resolve(statSlot); ok {
+				if served := in.ServedName(); served != "" && served != probe.Model {
+					if b, ok := replaceModel(body, served); ok {
+						body = b
+					}
+				}
+			}
+		}
 	}
 
 	// Anthropic path only: fold mid-conversation system turns so a strict chat
@@ -772,6 +824,25 @@ func injectMaxTokens(body []byte, n int) ([]byte, bool) {
 }
 
 // injectField inserts one `"key":value,` fragment right after the object's opening brace.
+// replaceModel sets the body's top-level `model` to served, leaving every other field's bytes
+// as they came. The body has already passed parseOrdered (one reading, no duplicate keys).
+func replaceModel(body []byte, served string) ([]byte, bool) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return body, false
+	}
+	m, err := json.Marshal(served)
+	if err != nil {
+		return body, false
+	}
+	fields["model"] = m
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return body, false
+	}
+	return out, true
+}
+
 func injectField(body []byte, fragment string) ([]byte, bool) {
 	i := bytes.IndexByte(body, '{')
 	if i < 0 {

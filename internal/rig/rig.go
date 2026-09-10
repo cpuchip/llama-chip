@@ -56,6 +56,7 @@ type Instance struct {
 	stopping bool
 	pid      int         // the launched llama-server's PID (0 when not running / external)
 	baseline map[int]int // external slots: each pinned card's mem_used (MiB) when the upstream first went healthy
+	docker   string      // container slots: the docker container name the rig launched (removed on unload)
 
 	vramOnce sync.Once
 	vramEst  int // MiB the slot is expected to hold: weights + KV at its context + overhead (0 = unknown)
@@ -133,6 +134,9 @@ func (in *Instance) snapshot() Status {
 	if in.External != nil {
 		st.External = in.External.String()
 		st.Kind = "external"
+		if in.docker != "" {
+			st.Kind = "container"
+		}
 		if len(in.baseline) > 0 {
 			st.BaselineMiB = make(map[int]int, len(in.baseline))
 			for k, v := range in.baseline {
@@ -169,6 +173,9 @@ type Rig struct {
 // An empty GPUs ([] or omitted) is a CPU-only slot: CUDA_VISIBLE_DEVICES="" hides every card and
 // the backend runs on CPU (the mode the GPU-less NOCIX node uses to keep the federation alive).
 func (r *Rig) Load(s config.Slot) error {
+	if s.Container != nil {
+		return r.loadContainer(s)
+	}
 	if s.External != "" {
 		return r.loadExternal(s)
 	}
@@ -227,9 +234,13 @@ func (r *Rig) Unload(name string) error {
 	in.mu.Lock()
 	in.stopping = true
 	cmd := in.cmd
+	container := in.docker
 	in.mu.Unlock()
 	if cmd != nil && cmd.Process != nil {
 		_ = cmd.Process.Kill()
+	}
+	if container != "" {
+		r.removeContainer(in, container)
 	}
 	in.set(Stopped, "")
 	r.log.Printf("[%s] unloaded", name)
@@ -425,9 +436,13 @@ func (r *Rig) StopAll() {
 		in.mu.Lock()
 		in.stopping = true
 		cmd := in.cmd
+		container := in.docker
 		in.mu.Unlock()
 		if cmd != nil && cmd.Process != nil {
 			_ = cmd.Process.Kill()
+		}
+		if container != "" { // a lab container must not outlive the rig holding its card
+			r.removeContainer(in, container)
 		}
 		in.set(Stopped, "")
 	}
